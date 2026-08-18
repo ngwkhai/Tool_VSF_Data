@@ -216,7 +216,7 @@ dir = "output"
 # mới lấy giá trị do bước `maps` phân loại (xem [category], schema.classify_l1).
 category_l1 = "FOOD"
 status = "active"
-review_status = "pending"
+review_status = "draft"
 booking_source = "internal"
 rating_source = "Google Maps"
 labeled_by = "Khải"

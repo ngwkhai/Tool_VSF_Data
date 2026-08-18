@@ -164,7 +164,7 @@ def _sample_record() -> POIRecord:
 
 
 DEFAULTS = {"category_l1": "FOOD", "status": "active",
-            "review_status": "pending", "booking_source": "internal",
+            "review_status": "draft", "booking_source": "internal",
             "rating_source": "Google Maps", "labeled_by": "Khải"}
 
 
@@ -198,7 +198,7 @@ def test_build_row_matches_sample_values():
     # seating_capacity để trống dù Gemini có trả về — Gemini chỉ đoán được.
     assert row["seating_capacity"] == ""
     assert row["dest"] == "thanh_pho_nha_trang"
-    assert row["status"] == "active" and row["review_status"] == "pending"
+    assert row["status"] == "active" and row["review_status"] == "draft"
     assert row["labeled_by"] == "Khải"
     assert row["by_pass"] == "FALSE"
 

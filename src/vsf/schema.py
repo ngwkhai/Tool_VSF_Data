@@ -703,7 +703,7 @@ def build_row(
         "nearby_hotel_ids": "",
         "status": defaults.get("status", "active"),
         "labeled_by": defaults.get("labeled_by", ""),
-        "review_status": defaults.get("review_status", "pending"),
+        "review_status": defaults.get("review_status", "draft"),
         "reviewer_note": "",
         "last_updated": date.today().isoformat(),
         "by_pass": "FALSE",
