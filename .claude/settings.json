@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python:*)",
+      "Bash(.venv/bin/vsf:*)",
+      "Bash(.venv/bin/pytest:*)",
+      "Bash(uv pip:*)",
+      "Bash(uv venv:*)",
+      "Read(//Users/nguyendinhkhai/Documents/Projects/Tool_VSF_Data/**)"
+    ]
+  }
+}

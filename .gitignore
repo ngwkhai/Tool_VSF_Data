@@ -1,0 +1,17 @@
+# Môi trường Python
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Kết quả gán nhãn — dữ liệu riêng của từng người, KHÔNG đẩy lên repo chung.
+# Dấu * là cố ý: bắt cả output/, output_12/, output_13_8/, output_17_8/...
+# Đổi lại thành "output/" là lần sau đẩy nhầm cả đợt gán nhãn lên GitHub.
+output*/
+them/
+scratch/
+
+# Rác cục bộ
+.DS_Store
+*.zip
+.claude/scheduled_tasks.lock

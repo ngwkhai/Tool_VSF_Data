@@ -1,0 +1,18 @@
+tags: bánh canh chả cá, lòng cá, bình dân, ăn xế, ăn vặt, ẩm thực vỉa hè, nha trang
+cuisine_type: Ẩm thực đường phố, Đặc sản Nha Trang
+price_per_person_avg: 35.000 VNĐ
+dietary_options: Chứa thành phần cá biển và nội tạng cá, không phù hợp cho người ăn chay hoặc bị dị ứng hải sản
+dress_code: casual
+view_type: Hướng phố
+operating_note: Quán chủ yếu bán vào tầm trưa đến chiều tối, thường rất nhanh hết lòng cá và trứng cá nếu đến muộn
+description_short: Bánh Canh Trần Văn Ơn là tọa độ ẩm thực vỉa hè nức tiếng tại Nha Trang, thu hút thực khách bởi tô bánh canh chất lượng với topping chả cá, lòng cá và cá dầm đậm đà.
+description_long: Nằm bình dị trên đường Trần Văn Ơn, quán bánh canh này từ lâu đã trở thành điểm đến "ruột" của vô số học sinh, sinh viên và người dân địa phương tại Nha Trang. Quán ghi điểm mạnh mẽ nhờ phần nước lèo hầm từ xương cá biển trong vắt, mang vị ngọt thanh mặn mòi tự nhiên. Một tô bánh canh đầy đặn sẽ được phục vụ cùng sợi bánh canh dai mềm, chả cá chiên, chả cá hấp dày miếng và đặc biệt là phần topping lòng cá, trứng cá cực kỳ béo ngậy, bùi giòn. Dù không gian chỉ là những bộ bàn ghế nhựa giản dị ven đường, nhưng hương vị dân dã, thơm ngon cùng mức giá siêu bình dân đã khiến quán lúc nào cũng tấp nập người ra vào.
+best_time_to_visit: Buổi chiều từ 14:30 đến 17:00 để thưởng thức đầy đủ các loại topping như lòng cá, trứng cá
+estimated_duration: 30 - 45 phút
+suitable_for: Học sinh, sinh viên, người dân địa phương, khách du lịch yêu thích ẩm thực vỉa hè bình dân và khám phá hương vị đặc sản truyền thống.
+not_suitable_for: Người ăn chay, người bị dị ứng hải sản, du khách tìm kiếm không gian nhà hàng khang trang, có máy lạnh hay nhạy cảm với sự ồn ào.
+insider_tips: Lòng cá và trứng cá ở quán rất thơm và nhanh hết, bạn nên dặn quán cho thêm vào tô hoặc gọi một đĩa riêng để ăn cho thỏa thích. Đừng quên gọi thêm một ổ bánh mì giòn rụm để chấm đẫm vào nước lèo ngọt thanh, kèm chút nước mắm ớt xiêm xanh cay nồng.
+weather_dependency: Mức độ ảnh hưởng cao. Do quán mang tính chất bình dân, chỗ ngồi vỉa hè và không gian mở nên việc ngồi ăn uống vào những ngày trời mưa giông lớn sẽ gặp khá nhiều bất tiện.
+crowd_level_note: Quán cực kỳ đông vào giờ tan tầm buổi chiều (16:00 - 17:30), chỗ ngồi có hạn nên việc phải chờ đợi hoặc ngồi ghép bàn là điều rất thường thấy.
+matched_intents: Ăn xế Nha Trang, ăn bánh canh chả cá ngon rẻ, quán bún cá lòng cá ngon, khám phá ẩm thực vỉa hè Nha Trang.
+search_keywords: bánh canh trần văn ơn nha trang, bánh canh lòng cá trần văn ơn, quán bánh canh ngon rẻ nha trang, bánh canh chả cá trần văn ơn, ăn vặt chiều nha trang.

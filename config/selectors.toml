@@ -1,0 +1,117 @@
+# TOÀN BỘ selector của 3 site. Đây là điểm vá duy nhất khi UI đổi.
+#
+# Giá trị dạng mảng = danh sách ứng viên, code thử lần lượt tới khi khớp.
+# Recon lần gần nhất: 2026-08-11, POI "Bánh Canh Trần Văn Ơn", cửa sổ 1600x1000.
+# Dò lại bằng: .venv/bin/python scripts/recon.py gmaps|tiktok "<tên POI>"
+#
+# LƯU Ý CHUNG: Google Maps chỉ nhận CLICK THẬT. Không dùng element.click() qua
+# JS — dùng Playwright locator.click() (phát trusted event qua CDP).
+
+[gemini]
+# Ô soạn thảo Quill. Nhập bằng execCommand('insertText') để Angular bắt được.
+editor = "rich-textarea .ql-editor"
+# Nút gửi CHỈ tồn tại khi ô nhập có text -> dùng chính nó làm tín hiệu sẵn sàng,
+# và sự BIẾN MẤT của nó sau khi gửi làm tín hiệu đã gửi thành công.
+send_button = "button[aria-label='Gửi tin nhắn']"
+# [verified 2026-08-17] Nếu một lượt trước đó bị treo (Gemini không bao giờ
+# sinh xong), nút này thay chỗ send_button và ở lại y nguyên trạng thái đó VÔ
+# THỜI HẠN — mọi tin nhắn gửi sau đó lặng lẽ xếp hàng phía sau, không bao giờ
+# có phản hồi (đã gặp: 8/10 bước menu fail liên tiếp cuối một batch dài, hoá ra
+# không phải do ảnh tải chậm mà do một lượt cũ bị treo từ trước). Phải kiểm tra
+# và bấm nút này để huỷ TRƯỚC khi gửi lượt mới.
+stop_button = "button[aria-label='Ngừng tạo câu trả lời']"
+response = "model-response"
+response_text = ".model-response-text"
+user_query = "user-query"
+# Nút đánh giá/sao chép CHỈ gắn vào khối khi Gemini đã sinh xong -> đây là tín
+# hiệu hoàn tất đáng tin nhất. "Text ngừng đổi" là KHÔNG đủ: Gemini hay dừng
+# nhiều giây giữa chừng trước khi xuất khối JSON/bảng lớn (đã kiểm chứng: text
+# đứng ở 117 ký tự rồi mới bung tiếp).
+response_complete = ["button[aria-label*='Câu trả lời tốt']", "button[aria-label*='Sao chép']"]
+# Vùng thả file của Gemini — đích để dispatch ClipboardEvent khi dán ảnh menu.
+dropzone = "div.xap-uploader-dropzone"
+composer = "input-container"
+upload_menu_button = "button[aria-label='Nội dung tải lên và công cụ']"
+file_input = "input[type='file']"
+# [verified 2026-08-17] Mỗi ảnh dán vào composer render 1 <gem-media-attachment>
+# kèm 1 spinner tải lên bên trong, biến mất khi ảnh tải xong. send_button lại
+# BẬT SẴN ngay khi vừa dán xong dù ảnh chưa tải xong -> không dùng nó làm tín
+# hiệu chờ ảnh. Phải chờ spinner biến mất trước khi gõ prompt/gửi, nếu không
+# Gemini nhận tin nhắn với ảnh dở dang -> không trả lời (treo tới hết 180s) hoặc
+# nút gửi "biến mất" trễ hơn 15s cũ chờ nổi (đã gặp: 10/11 bước menu fail liên
+# tiếp cuối một batch dài, thread chat càng dài UI càng render chậm).
+attachment_tile = "gem-media-attachment"
+upload_spinner = "mat-spinner, .mat-mdc-progress-spinner, [role='progressbar']"
+
+[gmaps]
+result_feed = "div[role='feed']"
+result_link = "a.hfpxzc"
+
+place_title = "h1.DUwDvf"
+# Nhãn ngành nghề ngay dưới tên quán ("Nhà hàng hải sản", "Quán cà phê",
+# "Khách sạn 3 sao"). Đây là nguồn quyết định category_l1/category_l2 — đọc hụt
+# thì schema.classify_l1 fail-open thành FOOD, luồng cũ vẫn chạy nhưng mất cổng
+# chặn POI không phải đồ ăn.
+#
+# [verified 2026-08-18] HAI BỐ CỤC khác nhau, phải có cả hai:
+#  - Quán ăn/cà phê/bảo tàng: button.DkEaL, bấm được (ZAVOD -> "Nhà hàng",
+#    Cà phê Nhiên -> "Quán cà phê", Bảo Tàng Hải Dương Học -> "Bảo tàng").
+#  - KHÁCH SẠN: KHÔNG có button.DkEaL. Nhãn là text thường span.mgr77e, kèm dấu
+#    chấm giữa ở đầu ("·Khách sạn 3 sao") -> gmaps.basic_info phải cắt bỏ.
+#
+# ĐỪNG thêm "button[jsaction*='pane.wfvdle']": đã thử, nó khớp 59-83 phần tử
+# và .first trả về chip gợi ý kèm ký tự icon ("\nKhách sạn gần đây"),
+# KHÔNG phải nhãn ngành. Một selector khớp nhầm còn tệ hơn không khớp gì.
+place_category = ["button.DkEaL", "span.mgr77e", "[jsaction*='category']"]
+rating_block = "div.F7nice"
+address = "[data-item-id='address']"
+# SĐT nằm ngay trong data-item-id: "phone:tel:0918253515" -> khỏi parse text.
+phone = "[data-item-id^='phone:tel:']"
+
+# Hàng "Đang mở cửa · Đóng cửa vào 14:00" — click để bung bảng 7 ngày.
+hours_toggle = "div.OqCZI"
+# Sau khi bung: 7 nút, aria-label = "Thứ Ba,10:00 đến 14:00, Sao chép giờ mở cửa"
+hours_day_button = "button.mWUh3d"
+
+# Ảnh đại diện. LƯU Ý: URL này TRÙNG với img.DaSXdd đầu tiên -> khi lấy ảnh phụ
+# phải loại trừ nó. Danh sách DaSXdd còn lẫn 1 ảnh Street View
+# (googleapis.com/v1/thumbnail) -> lọc chỉ giữ 'googleusercontent'.
+hero_image = [".RZ66Rb img", ".aoRNLd img"]
+secondary_image = "img.DaSXdd"
+# Nút mở gallery ảnh (nằm ở tab Tổng quan).
+photos_button = ["button.aoRNLd", ".RZ66Rb button"]
+# Chip phân loại trong gallery: Tất cả / Thực đơn / Thực phẩm và đồ uống / ...
+# QUAN TRỌNG: có hai bố cục. Quán nhỏ dùng button[data-tab-index] và hiện chữ
+# trong innerText; nhà hàng lớn dùng nút biểu tượng, nhãn CHỈ có ở aria-label.
+# Code đọc cả hai (xem read_labels trong gmaps.py).
+photo_category = ["div[role='tablist'] [role='tab']", "button[data-tab-index]", "div[role='tablist'] button"]
+# Ảnh gallery KHÔNG phải <img src> mà là CSS background-image trên div[role='img']
+# bên trong mỗi ô, và nạp lười theo cuộn. Xem _GALLERY_URLS_JS trong gmaps.py.
+gallery_tile = "a[data-photo-index]"
+
+tab = "button[role='tab']"
+tab_reviews = "button[role='tab'][aria-label*='Bài đánh giá']"
+tab_overview = "button[role='tab'][aria-label*='Tổng quan']"
+
+# Nút sắp xếp hiện nhãn của lựa chọn đang chọn ("Phù hợp nhất"), KHÔNG phải "Sắp xếp".
+sort_button = "button.HQzyZ"
+# Menu sắp xếp: data-index 0=Phù hợp nhất 1=Mới nhất 2=Xếp hạng cao nhất 3=Xếp hạng thấp nhất
+sort_option = "div[role='menuitemradio']"
+
+review_card = "div.jftiEf"
+review_author = ".d4r55"
+review_stars = "span[role='img'][aria-label*='sao']"
+review_date = ".rsqaWe"
+review_text = ".wiI7pd"
+review_more_button = "button[aria-label='Xem thêm']"
+scroll_pane = "div.m6QErb.DxyBCb"
+
+[tiktok]
+# Nội dung nạp CHẬM (>7s). Luôn wait_for_selector chứ đừng chờ cứng.
+result_list = "[data-e2e='search_top-item-list']"
+search_item = "[data-e2e='search_top-item']"
+video_link = "a[href*='/video/']"
+caption = ["[data-e2e='search-card-video-caption']", "[data-e2e='search-card-desc']"]
+author = "[data-e2e='search-card-user-unique-id']"
+views = "[data-e2e='video-views']"
+captcha = "#captcha-verify-page"
