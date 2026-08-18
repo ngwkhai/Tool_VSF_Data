@@ -18,12 +18,12 @@ from .config import output_dir, settings
 from .models import PROFILE_FIELDS, POIRecord, parse_profile_block
 from .schema import classify_l1, normalize_l2
 from .paste import paste_images, upload_via_file_input
-from .sites import gemini, gmaps, tiktok
+from .sites import facebook, gemini, gmaps, tiktok
 
 # `maps` chạy TRƯỚC `gemini1`: cả cổng "không phải FOOD" lẫn cổng "lấy nhầm
 # quán" đều nằm ở bước maps, đặt trước thì cả hai bắn xong mới tốn lượt Gemini
 # nào. Bonus: gemini1 được đưa địa chỉ Google ĐÃ XÁC NHẬN thay vì --address gõ tay.
-STEPS = ["maps", "gemini1", "old_address", "menu", "tiktok"]
+STEPS = ["maps", "gemini1", "old_address", "menu", "tiktok", "facebook"]
 console = Console()
 
 
@@ -546,10 +546,55 @@ def step_menu(s: Session, record: POIRecord, poi: str) -> None:
 
 def step_tiktok(s: Session, record: POIRecord, poi: str) -> None:
     page = s.page("tiktok")
-    candidates = tiktok.search(page, poi)
+    # Địa chỉ Google là thứ phân biệt CHI NHÁNH — caption của video đúng quán hay
+    # nhắc số nhà, còn video chi nhánh khác thì không.
+    address = (record.google_maps or {}).get("address", "")
+    if not address:
+        # Hay gặp khi chạy `--only tiktok` trên bản ghi mới: tín hiệu địa chỉ lặng
+        # lẽ bằng 0 cho mọi ứng viên, và đúng cái tín hiệu phân biệt CHI NHÁNH đó
+        # biến mất mà nhìn điểm số không thể biết.
+        record.warn("TikTok: chưa có địa chỉ từ bước maps — mất tín hiệu phân biệt chi nhánh")
+    candidates = tiktok.search(page, poi, address)
     record.tiktok = candidates
     if not candidates:
         record.warn("TikTok: không tìm được video nào")
+        return
+
+    threshold = settings()["tiktok"]["confidence_threshold"]
+    best = candidates[0].get("score", 0.0)
+    if best < threshold:
+        # Không raise: tiktok là bước gần cuối, chặn cả chuỗi ở đây là vứt luôn
+        # kết quả của 4 bước trước. Chỉ báo để tầng xuất bỏ trống cột.
+        record.warn(
+            f"TikTok: ứng viên tốt nhất chỉ đạt {best} < {threshold} — "
+            f"raw_url sẽ để trống, chọn tay bằng `vsf export --tiktok N`"
+        )
+
+
+def step_facebook(s: Session, record: POIRecord, poi: str) -> None:
+    """Xác minh quán qua Trang Facebook, rồi lấy Reels của Trang đã xác minh.
+
+    Là bước TĂNG CƯỜNG, không phải cổng chặn: chưa đăng nhập hay không tìm thấy
+    Trang thì chỉ cảnh báo, pipeline vẫn tính là xong.
+    """
+    page = s.page("facebook")
+    address = (record.google_maps or {}).get("address", "")
+
+    pages = facebook.search_pages(page, poi)
+    if not pages:
+        record.warn("Facebook: chưa đăng nhập hoặc không có kết quả — bỏ qua")
+        record.facebook = {}
+        return
+
+    verified = facebook.verify_page(poi, address, pages)
+    record.facebook = {"candidates": pages, "verified": verified, "reels": []}
+    if not verified:
+        record.warn("Facebook: không Trang nào khớp địa chỉ Google — không lấy Reels")
+        return
+
+    # Chỉ tới đây mới lấy video: Trang đã khớp địa chỉ thì Reels của nó mặc nhiên
+    # đúng quán. Lấy trước khi xác minh là rước nhầm quán trùng tên khác tỉnh.
+    record.facebook["reels"] = facebook.page_reels(page, verified)
 
 
 HANDLERS: dict[str, Callable[[Session, POIRecord, str], None]] = {
@@ -558,6 +603,7 @@ HANDLERS: dict[str, Callable[[Session, POIRecord, str], None]] = {
     "old_address": step_old_address,
     "menu": step_menu,
     "tiktok": step_tiktok,
+    "facebook": step_facebook,
 }
 
 

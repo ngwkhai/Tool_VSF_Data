@@ -103,20 +103,33 @@ def export(
     if record.tiktok:
         table = Table(title="Ứng viên TikTok")
         table.add_column("#")
-        table.add_column("Khớp")
-        table.add_column("Ngày đăng")
-        table.add_column("Link")
+        table.add_column("Điểm")
+        table.add_column("Vì sao")
+        table.add_column("Tài khoản")
+        table.add_column("Caption", max_width=44)
+        table.add_column("Ngày")
         for i, c in enumerate(record.tiktok):
             marker = "[green]→[/]" if i == tiktok else " "
-            table.add_row(f"{marker}{i}", str(c["match_score"]), (c["posted_at"] or "")[:10], c["url"])
+            breakdown = c.get("score_breakdown") or {}
+            why = ",".join(f"{k[:3]}{v}" for k, v in breakdown.items() if v)
+            table.add_row(
+                f"{marker}{i}",
+                str(c.get("score", c.get("match_score", ""))),
+                why,
+                str(c.get("author") or ""),
+                (c.get("caption") or "").replace("\n", " ")[:120],
+                (c.get("posted_at") or "")[:10],
+            )
         console.print(table)
+        for i, c in enumerate(record.tiktok):
+            console.print(f"[dim]{i}: {c['url']}[/]")
 
     console.print(f"Đã ghi [bold]{pipeline.export_row(record, tiktok_index=tiktok)}[/]")
 
 
 @app.command()
 def login() -> None:
-    """Mở Chrome (profile riêng của tool) để bạn đăng nhập Google + TikTok."""
+    """Mở Chrome (profile riêng của tool) để bạn đăng nhập Google + TikTok + Facebook."""
     port = settings()["browser"]["cdp_port"]
     if browser.is_chrome_running(port):
         console.print(f"[green]Chrome của tool đã chạy sẵn[/] trên cổng {port}.")
@@ -127,10 +140,15 @@ def login() -> None:
     with browser.Session() as s:
         s.goto("gemini_profile", settings()["gemini"]["profile_chat_url"])
         s.goto("tiktok", "https://www.tiktok.com/")
+        s.goto("facebook", "https://www.facebook.com/")
 
     console.print(
-        "\nHãy đăng nhập [bold]Google[/] và [bold]TikTok[/] trong cửa sổ vừa mở, "
-        "rồi chạy [bold]vsf doctor[/] để kiểm tra."
+        "\nHãy đăng nhập [bold]Google[/], [bold]TikTok[/] và [bold]Facebook[/] trong "
+        "cửa sổ vừa mở, rồi chạy [bold]vsf doctor[/] để kiểm tra."
+    )
+    console.print(
+        "[dim]Facebook chỉ dùng để XÁC MINH quán qua địa chỉ Trang; chưa đăng nhập "
+        "thì bước đó tự bỏ qua, phần còn lại vẫn chạy.[/]"
     )
 
 
@@ -138,10 +156,12 @@ def login() -> None:
 def doctor() -> None:
     """Kiểm tra môi trường: profile, đăng nhập, 2 chat Gemini có truy cập được không."""
     cfg = settings()
-    rows: list[tuple[str, bool, str]] = []
+    # (nhãn, ok, chi tiết, tuỳ chọn?). Cờ riêng chứ KHÔNG nhúng "[tuỳ chọn]" vào
+    # nhãn: Rich hiểu ngoặc vuông là thẻ markup và nuốt mất tiền tố.
+    rows: list[tuple[str, bool, str, bool]] = []
 
     with browser.Session() as s:
-        rows.append(("Chrome + cổng CDP", True, f"cổng {cfg['browser']['cdp_port']}"))
+        rows.append(("Chrome + cổng CDP", True, f"cổng {cfg['browser']['cdp_port']}", False))
 
         for slot, key, label in [
             ("gemini_profile", "profile_chat_url", "Gemini chat #1 (hồ sơ POI)"),
@@ -157,7 +177,7 @@ def doctor() -> None:
                 if ok
                 else ("chưa đăng nhập Google" if not signed_in else "không thấy ô nhập")
             )
-            rows.append((label, ok, detail))
+            rows.append((label, ok, detail, False))
 
         page = s.goto("tiktok", "https://www.tiktok.com/", force=True)
         page.wait_for_timeout(2500)
@@ -167,17 +187,63 @@ def doctor() -> None:
         from .config import sel
 
         blocked = page.locator(sel("tiktok", "captcha")).count() > 0
-        rows.append(("TikTok truy cập được", not blocked, "bị chặn/captcha" if blocked else "OK"))
+        rows.append(
+            ("TikTok truy cập được", not blocked, "bị chặn/captcha" if blocked else "OK", False)
+        )
+
+        # Tab "Người dùng" — nguồn tài khoản chính chủ — CHỈ chạy khi đã đăng nhập.
+        # Không đăng nhập thì tool vẫn chạy được (khớp tên vẫn nhận ra phần lớn tài
+        # khoản chính chủ), chỉ mất phần gỡ được POI tên Nga/Hàn.
+        tiktok_signed_in = "Đăng nhập" not in page.locator("body").inner_text()
+        rows.append(
+            (
+                "TikTok đăng nhập (tab Người dùng)",
+                tiktok_signed_in,
+                "OK"
+                if tiktok_signed_in
+                else "chưa đăng nhập — mất tín hiệu tài khoản chính chủ",
+                True,
+            )
+        )
+
+        page = s.goto("facebook", "https://www.facebook.com/", force=True)
+        page.wait_for_timeout(2500)
+        from .sites import facebook as fb
+
+        signed_in = fb.logged_in(page)
+        rows.append(
+            (
+                "Facebook đăng nhập",
+                signed_in,
+                "OK" if signed_in else "chưa đăng nhập — bước facebook sẽ bị bỏ qua",
+                True,
+            )
+        )
 
     table = Table(title="vsf doctor")
     table.add_column("Kiểm tra")
     table.add_column("Kết quả")
     table.add_column("Chi tiết")
-    for label, ok, detail in rows:
-        table.add_row(label, "[green]✓[/]" if ok else "[red]✗[/]", detail)
+    for label, ok, detail, optional in rows:
+        if ok:
+            mark = "[green]✓[/]"
+        else:
+            mark = "[yellow]—[/]" if optional else "[red]✗[/]"
+        table.add_row(f"{label} (tuỳ chọn)" if optional else label, mark, detail)
     console.print(table)
 
-    if not all(ok for _, ok, _ in rows):
+    # Mục "[tuỳ chọn]" hỏng KHÔNG phải lỗi môi trường: pipeline vẫn chạy đủ, chỉ
+    # mất phần tăng cường. Tính chúng vào điều kiện thoát là báo động giả, và
+    # doctor kêu sói thì lần sau không ai buồn đọc nữa.
+    required = [ok for _, ok, _, optional in rows if not optional]
+    degraded = [label for label, ok, _, optional in rows if not ok and optional]
+    if degraded:
+        console.print(
+            "[yellow]Chạy được, nhưng thiếu phần tăng cường:[/] "
+            + ", ".join(degraded)
+            + "\n[dim]Đăng nhập bằng `vsf login` để bật lại.[/]"
+        )
+    if not all(required):
         raise typer.Exit(1)
 
 

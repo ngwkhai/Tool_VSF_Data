@@ -8,7 +8,7 @@ qua 5 bước và ghi ra:
 
 ## Luồng nghiệp vụ
 
-`STEPS = ["maps", "gemini1", "old_address", "menu", "tiktok"]` — đúng 5 bước.
+`STEPS = ["maps", "gemini1", "old_address", "menu", "tiktok", "facebook"]` — đúng 6 bước.
 
 | Bước | Nguồn | Lấy gì |
 |---|---|---|
@@ -16,7 +16,8 @@ qua 5 bước và ghi ra:
 | `gemini1` | Gemini chat #1 (`bac782da...`) | Prompt **one-shot** (`[gemini] profile_prompt`) → cả 26 trường mô tả POI + quy ước trong MỘT lượt, kèm **địa chỉ Google đã xác nhận** ở bước `maps` để không lấy nhầm quán trùng tên |
 | `old_address` | Gemini chat #1 | Tên phường **trước sáp nhập 1/7/2025** → `old_address` |
 | `menu` | Gemini chat #2 (`d65843a9...`) | Dán ảnh thực đơn + `menu_prompt` → menu đã trích xuất |
-| `tiktok` | TikTok | Top 5 link ứng viên + caption + ngày đăng (người dùng tự chọn) |
+| `tiktok` | TikTok | Hợp tab **Top + Video**, cộng tab **Người dùng** để tìm tài khoản chính chủ. Top 5 ứng viên kèm `score` + `score_breakdown` |
+| `facebook` | Facebook | **Xác minh danh tính**: `search/pages` trả địa chỉ Trang → đối chiếu địa chỉ Google. Chỉ khi khớp mới lấy Reels |
 
 **`maps` chạy TRƯỚC `gemini1` là cố ý.** Hai cổng chặn (lấy nhầm quán, không
 phải FOOD) đều nằm ở `maps` và đều đặt ngay sau `basic_info` — trước khi cào
@@ -48,6 +49,16 @@ mọi bước sau đều phụ thuộc nó.
   cũ không bao giờ được nhận ra và số tab cứ thế phình lên.
 - Parser Gemini **luôn giữ `_raw`** và gom trường lạ vào `extra` — không bao giờ
   im lặng làm mất dữ liệu. Trường thiếu báo qua `_missing_fields`.
+- **Xếp hạng video là tổ hợp 4 tín hiệu có trọng số** (`caption`/`author`/`tag`/
+  `address`), trọng số nằm ở `[tiktok]` trong settings. Mỗi ứng viên lưu kèm
+  `score_breakdown` để về sau biết được chọn VÌ SAO. Đổi trọng số thì **phải**
+  chạy lại `scripts/rescore_tiktok.py` — nó chấm lại toàn bộ `output*/data.json`
+  offline, 0 request, và chính nó đã phát hiện cả 3 guard hiện có.
+- **Dưới `confidence_threshold` thì `raw_url` để TRỐNG**, không ghi bừa ứng viên
+  tốt nhất. Đo trên 119 POI: hơn 1/3 số dòng cũ không có cơ sở nào để tin. Ô
+  trống sửa được, dữ liệu sai lặng lẽ thì không.
+- **Facebook là bước TĂNG CƯỜNG, không phải cổng chặn.** Chưa đăng nhập hoặc
+  không tìm thấy Trang thì cảnh báo rồi đi tiếp — đừng raise, nó là bước cuối.
 
 ## Lệnh
 
@@ -55,7 +66,7 @@ mọi bước sau đều phụ thuộc nó.
 .venv/bin/vsf login      # mở Chrome profile riêng để đăng nhập Google + TikTok
 .venv/bin/vsf doctor     # kiểm tra profile, đăng nhập, 2 chat URL
 .venv/bin/vsf run "Tên POI"
-.venv/bin/vsf run "Tên POI" --only maps      # maps | gemini1 | old_address | menu | tiktok
+.venv/bin/vsf run "Tên POI" --only maps      # maps | gemini1 | old_address | menu | tiktok | facebook
 .venv/bin/vsf run "Tên POI" --resume         # bỏ qua bước đã ok
 .venv/bin/vsf run "Tên POI" --index 3 --out output_12/8   # đợt gán nhãn riêng
 .venv/bin/vsf run "Tên POI" --address "223 Nguyễn Thiện Thuật"   # quán trùng tên -> neo địa chỉ
@@ -63,6 +74,7 @@ mọi bước sau đều phụ thuộc nó.
 .venv/bin/vsf export "Tên POI"               # xuất lại row.tsv từ data.json
 .venv/bin/vsf export "Tên POI" --tiktok 2    # đổi link TikTok đã chọn
 .venv/bin/python -m pytest tests/ -q
+.venv/bin/python scripts/rescore_tiktok.py --threshold   # chấm lại offline, dò ngưỡng
 ```
 
 ## Tầng xuất dữ liệu (`schema.py`)
@@ -123,4 +135,14 @@ với dòng dữ liệu đúng do người dùng cung cấp:
 | Nguồn suy `category_l2` | Nhãn ngành Google xét **riêng và trước** tên quán. Gộp hai nguồn vào một chuỗi thì thứ tự khai báo hint quyết định thay vì độ tin cậy của nguồn (đã gặp: "ZAVOD restaurant & gastropub" ra `Quán Bar`). |
 | **Trùng tên giữa các tỉnh/trong cùng thành phố** | "Bánh Canh Ghẹ …" có ở cả Nha Trang lẫn Hà Nội; "Greek Cuisine" và "Greek Kitchen" trùng gần tên nhưng khác quán, khác địa chỉ, trong cùng Nha Trang. Truy vấn **luôn ghép `search_region`**, thêm `--address` thì ghép cả phần đường vào truy vấn (`search_query`). `step_maps` giờ **CHẶN HẲN** (raise, không chỉ warn) nếu `name_match`/`address_match` dưới ngưỡng — trước đây chỉ cảnh báo nên "Greek Cuisine" từng bị ghi "ok" với dữ liệu của "Greek Kitchen" (khớp đúng 0.5, sát ngưỡng cũ, lọt qua trong im lặng vì so sánh `<` không `<=`). |
 | Tab chất đống | Nhận diện tab qua biến JS trên `window` là vô dụng — navigation xoá sạch. Nhận qua URL. `close_stray_tabs()` dọn tab trắng + tab trùng slot, nhưng **không đụng** tab lạ của người dùng. |
+| Trang chi tiết video TikTok | **HTTP 403.** Không mở được `/@handle/video/<id>` → không có ảnh bìa, phụ đề, bình luận. Lưới video trang profile cũng hỏng ("Đã xảy ra lỗi"). Chỉ TRANG TÌM KIẾM là dùng được. Đây là lý do hướng VLM/OCR bị loại. |
+| Ảnh trong card TikTok | `img.src` là **placeholder GIF 1×1**; mọi ảnh http trên trang chỉ là avatar 100×100. Nhưng **`img.alt` giữ caption ĐẦY ĐỦ** (phần tử caption hiển thị bị CSS cắt cụt) — đọc alt trước, thường có cả địa chỉ đường. |
+| Khung hình video TikTok | Không bắt được. `<video>` có `crossOrigin="use-credentials"` mà CDN trả `access-control-allow-origin: null` → CORS trượt → `readyState` kẹt ở 0 vĩnh viễn. Không phải DRM (`ftypisom` hợp lệ), không phải CSP (`default-src` có `blob:`). Gọi `play()` thì **treo cả renderer**. |
+| `search-card-user-unique-id` | Hiện **nickname**, KHÔNG phải handle. Muốn handle thì lấy từ `href` (`/@<handle>/video/<id>`). So nhầm ở đây từng dẫn tới kết luận sai rằng tài khoản chính chủ vắng mặt trong tab Videos. |
+| Cuộn để lấy thêm kết quả TikTok | Vô ích: 24 → 24 sau 4 lần `scrollTo`. Mở rộng bể ứng viên phải bằng cách **đổi tab** (Top + Video), không phải cuộn sâu hơn. |
+| Card tab Người dùng TikTok | Đi ngược từ `[data-e2e='follow-back']` lên cha là hỏng — walk-up chạm container chung nên 20 card gộp thành 1. Duyệt thẳng `a[href^="/@"]`, bỏ link chỉ có 1 dòng text. |
+| idf dùng sai chỗ | idf của caption chỉ hợp để **phân biệt caption**, KHÔNG hợp để **so tên với handle**: chính chủ đăng cả 5 video thì tên quán có ở mọi caption, idf tụt về 0 và bộ lọc "từ đặc trưng" ném đi đúng cái tên cần khớp (đã gặp: "chớm brew&bloom" ra 0.0 dù cả 5 ứng viên đều của `@chớm`). |
+| Xác minh Trang Facebook | `gmaps.address_match` lấy **đoạn trước dấu phẩy đầu tiên** làm tên đường, mà Google hay đặt **Plus code** ở đó (`65VV+G77, 19 Đ. Lê Thánh Tôn, ...`). Không lọc thì đem Plus code đi so → luôn 0 → Trang ĐÚNG bị loại trong im lặng. Dùng `facebook.street_segment()`. |
+| Reels của Trang Facebook | **Đừng dùng `search/videos?q=<tên quán>`**: tìm theo từ khoá trả về video của bất kỳ ai nhắc tên đó, nên xác minh Trang xong cũng KHÔNG bảo đảm gì cho video (đã gặp: Trang "mo:sa coffee" xác minh đúng nhưng ra Reel của "Góc Của Mây"). Phải lấy từ tab video của chính Trang: `profile.php?id=<ref>&sk=videos`. |
+| URL Facebook | Nhồi tham số dài **trông như dữ liệu cookie** → công cụ trích xuất có thể chặn output. Cắt query string trước khi log. NHƯNG link Trang là `profile.php?id=<id>` — id nằm TRONG query string, đừng cắt bừa. |
 | `page.url` của Playwright | **Bị cũ** — không phản ánh `history.replaceState` của Google Maps. Luôn dùng `gmaps.current_url(page)` (`location.href`), nếu không mất sạch lat/long/place_id. |

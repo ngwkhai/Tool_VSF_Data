@@ -44,6 +44,7 @@ def slot_url_prefixes() -> dict[str, list[str]]:
         "gemini_menu": [menu_url],
         "gmaps": ["https://www.google.com/maps", "https://maps.google.com"],
         "tiktok": ["https://www.tiktok.com"],
+        "facebook": ["https://www.facebook.com", "https://facebook.com"],
     }
 
 

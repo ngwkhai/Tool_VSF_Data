@@ -173,6 +173,10 @@ class POIRecord:
     google_maps: dict[str, Any] = field(default_factory=dict)
     menu: dict[str, Any] = field(default_factory=dict)
     tiktok: list[dict[str, Any]] = field(default_factory=list)
+    # {"candidates": [...], "verified": {...}|None, "reels": [...]} — nguồn XÁC MINH
+    # danh tính (địa chỉ Trang đối chiếu địa chỉ Google), Reels chỉ là phần phụ.
+    # Mặc định rỗng để data.json của các lần chạy CŨ vẫn nạp được qua `cls(**data)`.
+    facebook: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")

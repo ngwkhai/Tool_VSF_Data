@@ -545,6 +545,44 @@ def derive_missing(profile: dict[str, Any], record: POIRecord) -> dict[str, Any]
 # -- Dựng dòng dữ liệu -----------------------------------------------------
 
 
+def pick_video(record: POIRecord, tiktok_index: int = 0) -> dict[str, Any]:
+    """Chọn video sẽ ghi vào `raw_url`, hoặc {} nếu không có gì đáng tin.
+
+    Ba mức, theo đúng thứ tự:
+
+    1. Ứng viên TikTok đạt ngưỡng tin cậy — nguồn chính.
+    2. Người dùng chỉ định tay (`--tiktok N`) — luôn tôn trọng, kể cả dưới ngưỡng:
+       họ đã tự nhìn danh sách rồi.
+    3. Reel của Trang Facebook ĐÃ XÁC MINH ĐỊA CHỈ — dự phòng. Trang khớp địa chỉ
+       Google thì video của nó đúng quán theo định nghĩa, nên còn đáng tin hơn một
+       ứng viên TikTok điểm thấp.
+
+    Không mức nào đạt thì trả {} và cột để TRỐNG. Ghi bừa ứng viên tốt nhất là
+    cách cũ, và đo trên 119 POI thì hơn một phần ba số dòng không có cơ sở nào
+    để tin — dữ liệu sai lặng lẽ còn tệ hơn ô trống.
+    """
+    from .config import settings
+
+    candidates = record.tiktok or []
+    if not (0 <= tiktok_index < len(candidates)):
+        candidates = []
+
+    if candidates:
+        picked = candidates[tiktok_index]
+        # Chọn tay thì bỏ qua ngưỡng; data.json cũ chưa có `score` cũng vậy.
+        if tiktok_index != 0 or "score" not in picked:
+            return picked
+        if picked.get("score", 0.0) >= settings()["tiktok"]["confidence_threshold"]:
+            return picked
+
+    fb = getattr(record, "facebook", None) or {}
+    if fb.get("verified"):
+        reels = fb.get("reels") or []
+        if reels:
+            return {"url": reels[0].get("url", ""), "posted_at": None}
+    return {}
+
+
 def build_row(
     record: POIRecord,
     defaults: dict[str, Any],
@@ -579,9 +617,7 @@ def build_row(
     hours = (maps.get("hours") or {}).get("by_day") or {}
 
     ward_map = ward_map or {}
-    picked = {}
-    if record.tiktok and 0 <= tiktok_index < len(record.tiktok):
-        picked = record.tiktok[tiktok_index]
+    picked = pick_video(record, tiktok_index)
 
     raw_address = maps.get("address") or ""
     location = split_address(raw_address)

@@ -117,8 +117,28 @@ scroll_pane = "div.m6QErb.DxyBCb"
 # Nội dung nạp CHẬM (>7s). Luôn wait_for_selector chứ đừng chờ cứng.
 result_list = "[data-e2e='search_top-item-list']"
 search_item = "[data-e2e='search_top-item']"
+# [verified 2026-08-18] Tab "Video" (/search/video?q=): 23-24 kết quả so với 5-12
+# của tab Top. Mọi selector dưới đây dùng được cho CẢ HAI tab.
+search_video_item = "[data-e2e='search_video-item']"
 video_link = "a[href*='/video/']"
 caption = ["[data-e2e='search-card-video-caption']", "[data-e2e='search-card-desc']"]
+# [verified 2026-08-18] CẨN THẬN: phần tử này hiển thị NICKNAME, không phải handle
+# ("Mẹ đơn thân Nha Trang 1984" chứ không phải "l.v6.3.1984"). Muốn handle thì
+# đọc từ href (/@<handle>/video/<id>) — so nhầm ở đây từng khiến tôi kết luận sai
+# rằng tài khoản chính chủ vắng mặt trong tab Videos.
 author = "[data-e2e='search-card-user-unique-id']"
 views = "[data-e2e='video-views']"
 captcha = "#captcha-verify-page"
+
+# Card ở tab "Người dùng" (/search/user?q=). Nhận diện bằng chính thẻ <a href="/@...">.
+# ĐỪNG đi ngược từ [data-e2e='follow-back'] lên cha: walk-up chạm container chung
+# của cả danh sách nên 20 card gộp thành 1.
+user_card = "a[href^='/@']"
+
+[facebook]
+# [verified 2026-08-18] Mỗi kết quả tìm kiếm là một [role="article"]; các dòng
+# innerText theo thứ tự [tên, dòng meta, mô tả, nút Theo dõi]. Dòng meta ngăn
+# bằng dấu CHẤM GIỮA (·), chứa nhãn ngành + số đánh giá + mức giá + ĐỊA CHỈ.
+article = "[role='article']"
+# Chưa đăng nhập thì Facebook trả form đăng nhập thay vì kết quả tìm kiếm.
+login_form = "input[name='pass']"

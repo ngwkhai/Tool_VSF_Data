@@ -368,3 +368,305 @@ def test_skip_reason_lets_food_through():
 
     record = _rec_with({"maps": "ok"}, l1="FOOD")
     assert all(_skip_reason(record, s) is None for s in STEPS)
+
+
+# -- Chấm điểm đa tín hiệu -------------------------------------------------
+#
+# Mỗi test dưới đây ứng với MỘT lỗi thật quan sát được trên dữ liệu đã cào, không
+# phải ca giả định. Xem scripts/rescore_tiktok.py để dựng lại.
+
+
+def _df(captions):
+    from vsf.sites.tiktok import document_frequency
+
+    return document_frequency(captions), len(captions)
+
+
+def test_caption_score_kills_words_present_in_every_candidate():
+    """Từ có ở MỌI ứng viên thì không phân biệt được gì -> phải hết trọng số.
+
+    Đây là gốc của thế hoà điểm: "Ăn Vặt Trịnh Huệ" từng được 0.5 cho cả 5 ứng
+    viên chỉ nhờ khớp "ăn vặt", từ mà mọi video ăn uống Nha Trang đều có.
+    """
+    from vsf.sites.tiktok import caption_score
+
+    captions = [
+        "quán ăn vặt ngon ở Nha Trang",
+        "ăn vặt Nha Trang siêu rẻ",
+        "top món ăn vặt Nha Trang",
+        "ăn vặt Nha Trang nè",
+    ]
+    df, n = _df(captions)
+    # Không caption nào nhắc "Trịnh Huệ" -> phải gần 0, không phải 0.5.
+    assert caption_score("Ăn Vặt Trịnh Huệ", captions[0], df, n) < 0.2
+
+
+def test_caption_score_rewards_the_distinctive_word():
+    from vsf.sites.tiktok import caption_score
+
+    captions = [
+        "quán ăn vặt ngon ở Nha Trang",
+        "ăn vặt Nha Trang siêu rẻ",
+        "ăn vặt Trịnh Huệ Nha Trang chuẩn vị",
+    ]
+    df, n = _df(captions)
+    hit = caption_score("Ăn Vặt Trịnh Huệ", captions[2], df, n)
+    miss = caption_score("Ăn Vặt Trịnh Huệ", captions[0], df, n)
+    assert hit > miss * 2
+
+
+def test_author_score_ignores_short_tokens_after_diacritic_stripping():
+    """GUARD: 'Đam' không được khớp '@Xóm Đầm'. Đầm ≠ Đam."""
+    from vsf.sites.tiktok import author_score
+
+    assert author_score("Đam Coffee & Fruit Juice", "Xóm Đầm") == 0.0
+
+
+def test_author_score_matches_a_single_name_segment():
+    """Tên quán ghép nhiều biến thể, handle chỉ lấy MỘT đoạn."""
+    from vsf.sites.tiktok import author_score
+
+    assert author_score("La Tra Milk Tea - Smoothie - Trà Sữa Lá Trà", "trasualatra") == 1.0
+    assert author_score("ФоБорщ / PhoBorsch", "phoborsch") == 1.0
+
+
+def test_author_score_survives_when_owner_posted_every_candidate():
+    """idf của caption KHÔNG được dùng ở đây.
+
+    Chính chủ đăng cả 5 video -> tên quán có ở mọi caption -> idf về 0. Nếu lọc
+    'từ đặc trưng' theo idf thì ném đi đúng cái tên cần khớp ("chớm brew&bloom"
+    từng được 0.0 dù cả 5 ứng viên đều của @chớm in the yard).
+    """
+    from vsf.sites.tiktok import author_score
+
+    assert author_score("chớm brew&bloom", "chớm in the yard") > 0.0
+
+
+def test_street_of_rejects_plus_code_and_river_name():
+    """GUARD: Plus code và tên sông KHÔNG phải địa chỉ đường."""
+    from vsf.sites.tiktok import street_of
+
+    assert street_of("65VV+G77, Nha Trang") == ("", [])
+    assert street_of("Sông Cái, Nha Trang") == ("", [])
+    number, words = street_of("121 Phạm Văn Đồng, Nha Trang")
+    assert number == "121" and "pham" in words
+
+
+def test_address_score_separates_two_branches_of_one_brand():
+    """Ca thật: 'Cà phê Đất Vàng' ở 121 Phạm Văn Đồng vs chi nhánh Mai Xuân Thưởng."""
+    from vsf.sites.tiktok import address_score
+
+    right = address_score("121 Phạm Văn Đồng, Nha Trang", "121 Phạm Văn Đồng Nha Trang #cafedatvang")
+    wrong = address_score("121 Phạm Văn Đồng, Nha Trang", "Cafe Đất Vàng, Mai Xuân Thưởng, Nha Trang.")
+    assert right > wrong
+
+
+def test_industry_stopword_does_not_make_a_category_word_distinctive():
+    """idf một mình không đủ: corpus tiếng Việt coi 'milk' là hiếm."""
+    from vsf.sites.tiktok import author_score
+
+    # "milk"/"tea" là từ ngành -> không được coi là bằng chứng chính chủ.
+    assert author_score("La Tra Milk Tea", "kachamilkteanhatrang") < 1.0
+
+
+def test_rank_candidates_puts_official_account_first():
+    from vsf.sites.tiktok import rank_candidates
+
+    cands = [
+        {"url": "https://x/@reviewer/video/1", "caption": "quán cà phê đẹp ở Nha Trang", "author": "reviewer", "handle": "reviewer"},
+        {"url": "https://x/@mosa.nhatrang/video/2", "caption": "mo:sa có món mới nè", "author": "mo:sa coffee", "handle": "mosa.nhatrang"},
+    ]
+    ranked = rank_candidates("mosa coffee", cands, official_handles=frozenset({"mosa.nhatrang"}))
+    assert ranked[0]["handle"] == "mosa.nhatrang"
+    assert ranked[0]["score_breakdown"]["author"] == 1.0
+
+
+# -- Cổng chặn tin cậy -----------------------------------------------------
+
+
+def _record_with_tiktok(cands, facebook=None):
+    from vsf.models import POIRecord
+
+    rec = POIRecord(poi_name="Quán Thử")
+    rec.tiktok = cands
+    if facebook is not None:
+        rec.facebook = facebook
+    return rec
+
+
+def test_pick_video_blanks_low_confidence_candidate():
+    from vsf.schema import pick_video
+
+    rec = _record_with_tiktok([{"url": "https://t/1", "score": 0.02}])
+    assert pick_video(rec) == {}
+
+
+def test_pick_video_keeps_confident_candidate():
+    from vsf.schema import pick_video
+
+    rec = _record_with_tiktok([{"url": "https://t/1", "score": 0.9}])
+    assert pick_video(rec)["url"] == "https://t/1"
+
+
+def test_pick_video_respects_a_manual_choice_below_threshold():
+    """Người dùng đã tự nhìn danh sách rồi -> đừng phủ quyết họ."""
+    from vsf.schema import pick_video
+
+    rec = _record_with_tiktok(
+        [{"url": "https://t/1", "score": 0.9}, {"url": "https://t/2", "score": 0.01}]
+    )
+    assert pick_video(rec, tiktok_index=1)["url"] == "https://t/2"
+
+
+def test_pick_video_keeps_old_records_without_scores():
+    """data.json cũ chưa có `score` -> không POI nào bỗng dưng mất link."""
+    from vsf.schema import pick_video
+
+    rec = _record_with_tiktok([{"url": "https://t/1", "match_score": 0.5}])
+    assert pick_video(rec)["url"] == "https://t/1"
+
+
+def test_pick_video_falls_back_to_verified_facebook_reel():
+    from vsf.schema import pick_video
+
+    rec = _record_with_tiktok(
+        [{"url": "https://t/1", "score": 0.01}],
+        facebook={"verified": {"name": "X"}, "reels": [{"url": "https://fb/reel/9"}]},
+    )
+    assert pick_video(rec)["url"] == "https://fb/reel/9"
+
+
+def test_pick_video_ignores_facebook_reels_when_page_unverified():
+    """Trang chưa khớp địa chỉ thì Reels của nó có thể là quán trùng tên tỉnh khác."""
+    from vsf.schema import pick_video
+
+    rec = _record_with_tiktok(
+        [{"url": "https://t/1", "score": 0.01}],
+        facebook={"verified": None, "reels": [{"url": "https://fb/reel/9"}]},
+    )
+    assert pick_video(rec) == {}
+
+
+# -- Facebook: xác minh bằng địa chỉ ---------------------------------------
+
+
+def test_facebook_meta_parser_finds_the_address_among_other_fields():
+    """Dòng meta gộp nhãn ngành + đánh giá + giá + địa chỉ + giờ + follower."""
+    from vsf.sites.facebook import _address_from_meta
+
+    meta = (
+        "Sản phẩm/Dịch vụ · 1 đánh giá · $ · 17/1 Lê Thánh Tôn, Phường Nha Trang, "
+        "Khánh Hoà · Đang mở cửa · 238 người theo dõi"
+    )
+    assert _address_from_meta(meta).startswith("17/1 Lê Thánh Tôn")
+
+
+def test_facebook_meta_parser_skips_counts_that_also_contain_digits():
+    """'1 đánh giá' và '238 người theo dõi' có số nhưng không phải địa chỉ."""
+    from vsf.sites.facebook import _address_from_meta
+
+    assert _address_from_meta("Quán cà phê · 12 đánh giá · 340 người theo dõi") == ""
+
+
+def test_facebook_verify_rejects_same_name_shop_in_another_province():
+    """Ca thật: 'mosa coffee' cho ra quán đúng + 2 shop thời trang tỉnh khác.
+
+    Quan trọng là loại được cả khi Trang sai CÓ địa chỉ đường đầy đủ — tức phải
+    do địa chỉ LỆCH, không phải do không parse nổi.
+    """
+    from vsf.sites.facebook import verify_page
+
+    pages = [
+        {"name": "Xưởng Thời Trang Nam - Mosa", "address": "25 Cầu Giấy, Hà Nội"},
+        {"name": "mo:sa coffee - Nha Trang", "address": "17/1 Lê Thánh Tôn, Nha Trang"},
+    ]
+    verified = verify_page("mosa coffee", "17/1 Lê Thánh Tôn, Nha Trang, Khánh Hòa", pages)
+    assert verified is not None
+    assert verified["name"] == "mo:sa coffee - Nha Trang"
+
+
+def test_facebook_verify_returns_none_without_a_google_address():
+    """Không có địa chỉ Google thì không có gì để đối chiếu -> đừng đoán bừa."""
+    from vsf.sites.facebook import verify_page
+
+    assert verify_page("X", "", [{"name": "X", "address": "1 Đường A"}]) is None
+
+
+def test_parse_views_handles_k_and_m_suffixes():
+    from vsf.sites.tiktok import parse_views
+
+    assert parse_views("7254") == 7254
+    assert parse_views("12.3K") == 12300
+    assert parse_views("1.2M") == 1_200_000
+    assert parse_views("") == 0
+    assert parse_views("N/A") == 0
+
+
+def test_views_break_ties_but_never_outrank_a_real_signal():
+    """Video nhiều view nhất về quán KHÁC vẫn là video sai quán."""
+    from vsf.sites.tiktok import rank_candidates
+
+    cands = [
+        {"url": "https://x/@a/video/1", "caption": "quán nào đó", "handle": "a", "views": "9.9M"},
+        {"url": "https://x/@mosa.nhatrang/video/2", "caption": "mo:sa nè", "handle": "mosa.nhatrang", "views": "10"},
+    ]
+    ranked = rank_candidates("mosa coffee", cands, official_handles=frozenset({"mosa.nhatrang"}))
+    assert ranked[0]["handle"] == "mosa.nhatrang"
+
+    tied = [
+        {"url": "https://x/@m/video/1", "caption": "mo:sa nè", "handle": "m", "views": "26"},
+        {"url": "https://x/@m/video/2", "caption": "mo:sa nè", "handle": "m", "views": "7254"},
+    ]
+    assert rank_candidates("mosa coffee", tied)[0]["views"] == "7254"
+
+
+def test_cyrillic_names_are_transliterated_before_matching():
+    """Không chuyển tự thì _squash trả chuỗi RỖNG và mọi so khớp âm thầm ra 0.
+
+    Đây là gốc của việc 12 POI tên Nga/Hàn toàn 0.0 điểm.
+    """
+    from vsf.sites.tiktok import _squash, author_score
+
+    assert _squash("Кафе Лан") == "kafelan"
+    assert _squash("ФоБорщ") == "foborshch"
+    # Tên có kèm alias Latin thì khớp được qua chính đoạn Latin đó.
+    assert author_score("ФоБорщ / PhoBorsch", "phoborsch") == 1.0
+
+
+def test_no_fuzzy_matching_on_account_names():
+    """Chốt lại một hướng ĐÃ THỬ VÀ LOẠI, để đừng ai thêm lại.
+
+    So mờ trên tên đã dính liền chọn SAI đúng ca cần cứu: với "Кафе Лан"
+    (-> "kafelan"), quán KHÁC "Cafe Lan Anh" đạt 0.86 còn tài khoản đúng
+    "@caflan.flan.gi.s" chỉ 0.71. Tên quán quá ngắn và quá giống nhau.
+    """
+    from vsf.sites.tiktok import author_score
+
+    # Không khớp được thì phải trả 0 và để cổng tin cậy bỏ trống,
+    # KHÔNG được đoán bừa sang một quán tên na ná.
+    assert author_score("Кафе Лан", "cafelananh") == 0.0
+
+
+def test_facebook_street_segment_skips_google_plus_code():
+    """Google hay đặt Plus code làm đoạn đầu, và address_match lấy đúng đoạn đó.
+
+    Không lọc thì đem "65VV+G77" đi so với địa chỉ Facebook -> luôn 0 -> Trang
+    ĐÚNG bị loại trong im lặng (đã gặp nguyên văn với "mosa coffee").
+    """
+    from vsf.sites.facebook import street_segment, verify_page
+
+    google = "65VV+G77, 19 Đ. Lê Thánh Tôn, Nha Trang, Khánh Hòa 650000, Việt Nam"
+    assert street_segment(google) == "19 Đ. Lê Thánh Tôn"
+
+    pages = [{"name": "mo:sa coffee - Nha Trang", "address": "17/1 Lê Thánh Tôn, Nha Trang"}]
+    assert verify_page("mosa coffee", google, pages) is not None
+
+
+def test_facebook_page_ref_handles_both_id_and_vanity_slug():
+    from vsf.sites.facebook import page_ref
+
+    assert page_ref("https://www.facebook.com/profile.php?id=61591157881013&__tn__=%3C") == "61591157881013"
+    assert page_ref("/mosacoffee") == "mosacoffee"
+    assert page_ref("") == ""
+    # /reel/ và /watch không phải định danh Trang.
+    assert page_ref("/reel/123456789") == ""

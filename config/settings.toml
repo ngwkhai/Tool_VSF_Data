@@ -205,7 +205,70 @@ image_size = 1080
 
 [tiktok]
 search_url = "https://www.tiktok.com/search?q={query}"
+# Tab "Video" cho 23-24 kết quả trong khi tab "Top" chỉ 5-12, và mọi selector
+# đang khai báo dùng được nguyên xi cho cả hai. Cuộn KHÔNG ra thêm kết quả (đã
+# đo 2026-08-18: 24 -> 24 sau 4 lần cuộn) nên mở rộng bể ứng viên phải bằng cách
+# hợp hai tab.
+video_search_url = "https://www.tiktok.com/search/video?q={query}"
+# Tab "Người dùng" — nguồn tài khoản chính chủ. Đây là cách duy nhất gỡ được POI
+# tên không phải Latin: TikTok tự chuyển tự, "Кафе Лан" ra "@caflan.flan.gi.s /
+# CAFLAN NHA TRANG", việc mà mọi cách so chuỗi cục bộ đều bó tay.
+user_search_url = "https://www.tiktok.com/search/user?q={query}"
 candidate_count = 5
+user_candidate_count = 20
+search_timeout_ms = 45000
+
+# Trọng số 4 tín hiệu. `author` nặng gần bằng `caption` vì đo trên 121 POI: 55
+# POI có tài khoản chính chủ trong danh sách, 25 trong số đó bị xếp dưới reviewer
+# vãng lai do trước đây `author` hoàn toàn không được chấm điểm.
+weight_caption = 0.40
+weight_author = 0.35
+weight_tag = 0.15
+weight_address = 0.10
+
+# Dưới ngưỡng này thì raw_url + video_posted_date để TRỐNG kèm cảnh báo, thay vì
+# ghi bừa ứng viên tốt nhất. Hiệu chỉnh bằng scripts/rescore_tiktok.py, đừng đoán.
+#
+# Thang điểm để đọc con số này cho đúng (tổng trọng số = 1.0):
+#   chỉ author khớp trọn      -> 0.35   (đã đủ tin: đúng tài khoản quán)
+#   author khớp một phần      -> 0.175
+#   caption trọn + hashtag    -> 0.55
+# Chọn 0.20 để giữ lại nhóm "author khớp một phần" — bộ đo chạy trên data.json CŨ
+# nên chưa có cú hích từ tab Users; ngoài thực tế các ca đó lên 0.35 (đã gặp:
+# "chớm brew&bloom" đúng tài khoản chính chủ nhưng chỉ được 0.175 khi đo lại).
+# Chạy lại `rescore_tiktok.py --threshold` sau đợt cào đầu tiên để chốt lại.
+confidence_threshold = 0.20
+# Điểm khớp tên tối thiểu để coi một tài khoản ở tab Users là chính chủ. Tab Users
+# xếp theo độ liên quan CỦA TIKTOK: truy vấn "Кафе Лан" cho tài khoản 62K follower
+# không liên quan ở #1, quán thật ở #2 -> vẫn phải tự đối chiếu tên.
+official_account_threshold = 0.5
+
+# Từ chỉ NGÀNH chứ không chỉ danh tính quán. Cần khai báo tay BÊN CẠNH idf: idf
+# tính trên caption tiếng Việt nên coi từ ngành tiếng Anh là "hiếm" và cho điểm
+# cao oan (đã gặp: "milk" -> "La Tra Milk Tea" khớp nhầm "@kachamilkteanhatrang").
+industry_stopwords = [
+  "ca", "phe", "cafe", "café", "coffee", "quan", "nha", "hang", "restaurant",
+  "tra", "sua", "an", "vat", "banh", "com", "bar", "pub", "tiem", "shop",
+  "food", "drink", "milk", "tea", "juice", "bakery", "kitchen", "bistro",
+  "beer", "buffet", "grill", "eatery", "store", "house", "garden", "roastery",
+]
+
+# Facebook KHÔNG phải nguồn video chính — nó là nguồn XÁC MINH. Giá trị nằm ở chỗ
+# search/pages trả về địa chỉ đường của quán, thứ tách được quán trùng tên mà
+# TikTok bắt phải đoán mò (đo 2026-08-18: cùng truy vấn "mosa coffee Nha Trang"
+# cho ra quán đúng ở Nha Trang + 2 shop thời trang ở Hà Nội và Sơn La).
+[facebook]
+search_pages_url = "https://www.facebook.com/search/pages?q={query}"
+# Tab video của CHÍNH Trang. Phải lấy từ đây chứ không phải search/videos?q=:
+# tìm theo từ khoá trả về video của bất kỳ ai nhắc tên quán, nên xác minh Trang
+# xong cũng không bảo đảm gì cho video (đã gặp: Trang "mo:sa coffee" xác minh
+# đúng nhưng tìm từ khoá ra Reel của "Góc Của Mây" và một quảng cáo hè).
+page_videos_url = "https://www.facebook.com/profile.php?id={ref}&sk=videos"
+candidate_count = 5
+search_timeout_ms = 30000
+# Tỉ lệ từ trong phần ĐƯỜNG của địa chỉ Google khớp địa chỉ Trang Facebook. Dùng
+# chung quy tắc với gmaps.address_match để không có hai chuẩn so khớp khác nhau.
+address_match_threshold = 0.5
 
 [output]
 dir = "output"
