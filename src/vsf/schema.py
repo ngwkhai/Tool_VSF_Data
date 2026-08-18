@@ -164,7 +164,7 @@ def boolean(value: Any) -> str:
 def quoted_comments(reviews: list[dict[str, Any]], limit: int = 5) -> str:
     """Ghép bình luận theo dạng dataset: mỗi bình luận là một đoạn văn riêng.
 
-    Ngăn cách giữa các bình luận bằng dòng trống, không bọc nháy kép
+    Ngăn cách giữa các bình luận bằng MỘT dòng mới, không bọc nháy kép
     (csv.DictWriter tự quote cả field nếu nó chứa newline, theo RFC4180).
     XUỐNG DÒNG BÊN TRONG một bình luận (review gốc nhiều đoạn) bị gộp lại
     thành khoảng trắng — chỉ ranh giới GIỮA hai bình luận mới được xuống dòng,
@@ -180,7 +180,7 @@ def quoted_comments(reviews: list[dict[str, Any]], limit: int = 5) -> str:
             parts.append(text)
         if len(parts) >= limit:
             break
-    return "\n\n".join(parts)
+    return "\n".join(parts)
 
 
 def slug_dest(city: str | None, address: str | None) -> str:

@@ -105,7 +105,7 @@ def test_boolean_normalises_to_dataset_form():
 
 def test_quoted_comments_joins_each_as_separate_paragraph():
     out = quoted_comments([{"text": "Món ngon"}, {"text": "Giá rẻ"}])
-    assert out == "Món ngon\n\nGiá rẻ"
+    assert out == "Món ngon\nGiá rẻ"
 
 
 def test_quoted_comments_skips_empty_reviews():
@@ -119,7 +119,7 @@ def test_quoted_comments_collapses_newlines_within_one_review():
     out = quoted_comments(
         [{"text": "Đoạn 1\n\nĐoạn 2"}, {"text": "Review khác"}]
     )
-    assert out == "Đoạn 1 Đoạn 2\n\nReview khác"
+    assert out == "Đoạn 1 Đoạn 2\nReview khác"
 
 
 # -- Dựng nguyên một dòng --------------------------------------------------
@@ -647,14 +647,14 @@ def test_build_row_blanks_fake_english_name():
 def test_quoted_comments_caps_at_five():
     from vsf.schema import quoted_comments
     reviews = [{"text": f"binh luan {i}"} for i in range(9)]
-    assert quoted_comments(reviews).count("\n\n") == 4  # 5 đoạn, 4 dòng trống ngăn cách
+    assert quoted_comments(reviews).count("\n") == 4  # 5 đoạn, 4 dòng ngăn cách
 
 
 def test_quoted_comments_skips_empty_then_still_caps():
     """Bài chấm sao không viết gì bị bỏ qua, nhưng vẫn không vượt quá 5 câu."""
     from vsf.schema import quoted_comments
     reviews = [{"text": ""}, {"text": "  "}] + [{"text": f"c{i}"} for i in range(7)]
-    assert quoted_comments(reviews) == "c0\n\nc1\n\nc2\n\nc3\n\nc4"
+    assert quoted_comments(reviews) == "c0\nc1\nc2\nc3\nc4"
 
 
 def test_quoted_comments_accepts_fewer_than_five():

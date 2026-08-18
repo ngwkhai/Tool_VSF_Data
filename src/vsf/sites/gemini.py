@@ -98,17 +98,37 @@ def type_prompt(page: Page, text: str) -> None:
     Dùng execCommand('insertText') thay vì gán innerText: Quill/Angular chỉ cập
     nhật model khi có beforeinput/input event thật, và đây là cách rẻ nhất tạo ra
     chúng cho text dài (nhanh hơn nhiều so với gõ từng phím).
+
+    `insertText` với '\\n' nhúng bên trong CHỈ giữ lại dòng đầu tiên — mọi dòng
+    sau đó biến mất, lặng lẽ cắt cụt bất kỳ prompt nhiều đoạn nào (đã gặp:
+    profile_prompt/reformat_prompt nhiều dòng bị cắt còn mỗi câu mở đầu, Gemini
+    trả lời lạc đề với phần còn lại của thread thay vì làm theo prompt). Phải
+    tách theo dòng và chèn `insertLineBreak` giữa các dòng — khác với
+    `insertParagraph` (cũng bị cắt) hay Shift+Enter qua keyboard (lặp/xáo trộn
+    dòng). Riêng `insertLineBreak` cũng cần `await` một `requestAnimationFrame`
+    sau MỖI lệnh: bắn cả loạt execCommand liên tiếp không nhường Quill thời gian
+    xử lý mutation của lệnh trước, sinh dư `<br>` (verified: cứ vài chục dòng
+    lại phình gấp 4-5 lần) dù nội dung text vẫn nguyên vẹn.
     """
     ed = _editor(page)
     ed.click()
     human_delay(0.2, 0.5)
     page.evaluate(
-        """([css, text]) => {
+        """async ([css, text]) => {
             const el = document.querySelector(css);
             el.focus();
             document.execCommand('selectAll', false, null);
             document.execCommand('delete', false, null);
-            document.execCommand('insertText', false, text);
+            const lines = text.split('\\n');
+            const raf = () => new Promise(r => requestAnimationFrame(r));
+            for (let i = 0; i < lines.length; i++) {
+                if (i > 0) {
+                    document.execCommand('insertLineBreak', false, null);
+                    await raf();
+                }
+                document.execCommand('insertText', false, lines[i]);
+                await raf();
+            }
         }""",
         [sel("gemini", "editor"), text],
     )

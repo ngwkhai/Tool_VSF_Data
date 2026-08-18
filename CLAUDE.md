@@ -88,7 +88,7 @@ với dòng dữ liệu đúng do người dùng cung cấp:
 | `ward` | Tên phường **sau sáp nhập 2025** — tra `[ward_map]` trong settings; Google vẫn trả tên cũ. Địa chỉ gốc giữ ở `old_address` |
 | `city` | Chuẩn hoá `Khánh Hòa` → `Khánh Hoà` (dataset viết `oà`) |
 | `cover_image_url` / `gallery_urls` | Để **trống** — ảnh chỉ điền vào `raw_*` |
-| `positive/negative_comments` | Mỗi bình luận là **một đoạn văn riêng biệt**, ngăn bởi dòng trống, không bọc nháy kép — `csv.DictWriter` tự quote cả field theo RFC4180 vì nó chứa newline. Xuống dòng **bên trong** một bình luận gốc (review nhiều đoạn) bị gộp thành khoảng trắng — chỉ ranh giới giữa hai bình luận mới xuống dòng. **Tối đa 5** mỗi bên, cắt trần ngay tại tầng xuất (`quoted_comments`) vì bài không có nội dung bị bỏ qua. Ít hơn 5 là bình thường |
+| `positive/negative_comments` | Mỗi bình luận là **một đoạn văn riêng biệt**, ngăn bởi **một** dòng mới, không bọc nháy kép — `csv.DictWriter` tự quote cả field theo RFC4180 vì nó chứa newline. Xuống dòng **bên trong** một bình luận gốc (review nhiều đoạn) bị gộp thành khoảng trắng — chỉ ranh giới giữa hai bình luận mới xuống dòng. **Tối đa 5** mỗi bên, cắt trần ngay tại tầng xuất (`quoted_comments`) vì bài không có nội dung bị bỏ qua. Ít hơn 5 là bình thường |
 
 ## Môi trường
 
