@@ -422,10 +422,46 @@ def photos(page: Page) -> dict[str, Any]:
     }
 
 
-def menu_photos(page: Page) -> dict[str, Any]:
-    """Ảnh trong mục thực đơn của gallery.
+def _top_level_menu_tab_images(page: Page, cfg: dict) -> list[str]:
+    """Ảnh trong tab "Thực đơn" cấp cao nhất (cạnh Tổng quan/Bài đánh giá).
 
-    Nhiều quán nhỏ không có mục "Thực đơn" -> lùi dần theo
+    Đây là nguồn KHÁC với mục "Thực đơn" trong gallery ảnh bên dưới — nhiều
+    quán có tab riêng này mà gallery lại không có mục tương ứng (đã gặp: "kiku
+    cafe bar", gallery chỉ có Tất cả/Mới nhất/Video/..., bị kết luận nhầm
+    "không có ảnh thực đơn" trong khi tab Thực đơn có sẵn ảnh). Trả về [] nếu
+    không có tab hoặc tab không có ảnh nào (menu chỉ có chữ, không ảnh).
+    """
+    tab = page.locator(sel("gmaps", "tab_menu"))
+    if tab.count() == 0:
+        return []
+    try:
+        tab.first.click(timeout=8000)
+        page.wait_for_timeout(2500)
+    except Exception:
+        return []
+
+    imgs = page.locator(sel("gmaps", "secondary_image"))
+    seen_bases: set[str] = set()
+    urls: list[str] = []
+    for i in range(imgs.count()):
+        src = imgs.nth(i).get_attribute("src") or ""
+        if "googleusercontent.com" not in src:
+            continue
+        base = src.split("=")[0]
+        if base in seen_bases:
+            continue
+        seen_bases.add(base)
+        urls.append(upgrade_image_url(src, cfg["image_size"]))
+        if len(urls) >= cfg["max_menu_images"]:
+            break
+    return urls
+
+
+def menu_photos(page: Page) -> dict[str, Any]:
+    """Ảnh thực đơn: ưu tiên tab "Thực đơn" cấp cao nhất, lùi về mục trong
+    gallery ảnh nếu quán không có tab đó.
+
+    Nhiều quán nhỏ không có mục "Thực đơn" trong gallery -> lùi dần theo
     MENU_CATEGORY_PREFERENCE và ghi lại đã dùng mục nào.
     """
     cfg = settings()["gmaps"]
@@ -440,6 +476,23 @@ def menu_photos(page: Page) -> dict[str, Any]:
             page.wait_for_timeout(2500)
         except Exception:
             pass
+
+    top_level_images = _top_level_menu_tab_images(page, cfg)
+
+    # Dù thử tab Thực đơn có ra ảnh hay không, quay lại Tổng quan trước khi đi
+    # tiếp: nút mở gallery bên dưới chỉ tồn tại ở tab đó.
+    overview = page.locator(sel("gmaps", "tab_overview"))
+    if overview.count():
+        try:
+            overview.first.click(timeout=8000)
+            page.wait_for_timeout(1500)
+        except Exception:
+            pass
+
+    if top_level_images:
+        out["images"] = top_level_images
+        out["category_used"] = "Thực đơn (tab)"
+        return out
 
     button = _first_present(page, sel_list("gmaps", "photos_button"))
     if button is None:

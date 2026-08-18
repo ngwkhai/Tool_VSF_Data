@@ -92,6 +92,13 @@ gallery_tile = "a[data-photo-index]"
 tab = "button[role='tab']"
 tab_reviews = "button[role='tab'][aria-label*='Bài đánh giá']"
 tab_overview = "button[role='tab'][aria-label*='Tổng quan']"
+# [verified 2026-08-19] Tab "Thực đơn" cấp cao nhất, cạnh Tổng quan/Bài đánh
+# giá — TÁCH BIỆT với mục "Thực đơn" trong gallery ảnh (photo_category bên
+# dưới). Nhiều quán có tab này mà KHÔNG có mục gallery tương ứng (đã gặp:
+# "kiku cafe bar" — gallery chỉ có Tất cả/Mới nhất/Video/..., không có Thực
+# đơn, nhưng tab riêng này có sẵn 4 ảnh thực đơn). Ảnh trong tab dùng lại
+# secondary_image (img.DaSXdd) vì cùng class.
+tab_menu = "button[role='tab'][aria-label*='Thực đơn']"
 
 # Nút sắp xếp hiện nhãn của lựa chọn đang chọn ("Phù hợp nhất"), KHÔNG phải "Sắp xếp".
 sort_button = "button.HQzyZ"

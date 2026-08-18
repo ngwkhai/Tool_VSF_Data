@@ -139,7 +139,21 @@ def type_prompt(page: Page, text: str) -> None:
 
 
 def send(page: Page) -> None:
-    page.locator(sel("gemini", "send_button")).first.click()
+    """Bấm gửi.
+
+    Nút hiện diện ngay khi ô nhập có text, nhưng còn DISABLED cho tới khi mọi
+    ảnh đính kèm tải lên xong — với lượt dán nhiều ảnh thực đơn việc này có thể
+    mất hơn 30s (đã kiểm chứng thực tế ~60-90s cho 5 ảnh), vượt quá timeout mặc
+    định của `.click()` và khiến lượt gửi lỗi dù ảnh cuối cùng vẫn tải xong.
+    Tự chờ nút BẬT trước, dùng chung ngưỡng với chờ Gemini trả lời.
+    """
+    btn = page.locator(sel("gemini", "send_button")).first
+    wait_until(
+        btn.is_enabled,
+        timeout=settings()["gemini"]["response_timeout"],
+        what="nút gửi hết bị vô hiệu hoá (ảnh đính kèm tải lên xong)",
+    )
+    btn.click()
 
 
 def wait_for_response(page: Page, previous_count: int) -> str:
