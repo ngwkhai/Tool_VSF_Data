@@ -77,6 +77,81 @@ mọi bước sau đều phụ thuộc nó.
 .venv/bin/python scripts/rescore_tiktok.py --threshold   # chấm lại offline, dò ngưỡng
 ```
 
+### Chạy lô + giao diện quản lý (v2)
+
+```bash
+.venv/bin/vsf batch reindex                  # nạp mọi output*/ đã có vào chỉ mục
+.venv/bin/vsf batch add ds.csv --out output_19_8 --name "Đợt 19/8"
+.venv/bin/vsf batch run --batch 3            # chạy tuần tự, một Session cho cả lô
+.venv/bin/vsf batch status                   # tiến độ các đợt
+.venv/bin/vsf batch status --flag tiktok_below_threshold   # hàng đợi triage
+.venv/bin/vsf batch retry --batch 3          # đưa job hỏng về hàng đợi
+.venv/bin/vsf batch export --batch 3         # gộp row.tsv cả đợt
+.venv/bin/vsf ui                             # giao diện tại http://127.0.0.1:8000
+```
+
+Giao diện cần cài thêm: `uv pip install -e ".[ui]"` rồi `cd ui && npm install && npm run build`.
+Core CLI vẫn chỉ 3 dependency — FastAPI/uvicorn nằm ở nhóm tuỳ chọn `[ui]`.
+
+Đầu vào `batch add` nhận ba dạng, tự nhận biết:
+
+1. **Bảng không có tiêu đề** — `tên <TAB> địa chỉ <TAB> place_id`. Dạng dán thẳng
+   ra được từ bảng tính, và là dạng nên dùng.
+2. CSV có cột `name` (kèm được `address`, `place_id`, `index`, `force_food`, `only`).
+3. Text thuần, mỗi dòng một tên.
+
+**`place_id` là neo mạnh nhất.** Có nó thì `gmaps.open_place` mở THẲNG đúng địa
+điểm (`/maps/place/?q=place_id:…`), bỏ qua hẳn khâu tìm kiếm — và cùng với nó là
+cả lớp lỗi "Google trả nhầm quán trùng tên". Khi đó `_reject_wrong_place` **không
+chặn**: cổng đó tồn tại để đoán xem Google có trả đúng quán không, mà mở bằng
+place_id là đã biết chắc. Vẫn chặn thì tên người dùng gõ khác tên Google đăng ký
+(chuyện thường: "Bún Cá Sứa NhaTrang") sẽ loại oan đúng POI đã bỏ công tra id.
+Tên lệch nhiều vẫn được `warn` để rà lại.
+
+`place_id` được bóc theo **hình dạng chuỗi, không theo vị trí cột** — địa chỉ đầy
+dấu phẩy nên số ô thay đổi tuỳ nguồn dán. Yêu cầu có cả chữ hoa lẫn chữ thường,
+nếu không một tên viết liền không dấu ("BUNBOTUNGHOANGCHINHANH2") cũng lọt và bị
+cắt khỏi tên. Ngăn ô bằng tab **hoặc từ 2 dấu cách trở lên** — một dấu cách đơn
+không tính, vì tên quán và địa chỉ đều đầy dấu cách đơn.
+
+`address_hint` và `place_id` nằm trong `store._STICKY`: giá trị rỗng **không bao
+giờ** ghi đè giá trị đã có. Thiếu chốt này thì chạy `vsf batch reindex` một lần
+(reindex đọc từ đĩa, không biết place_id) là bay sạch id vừa nạp — hỏng trong im
+lặng, chỉ lộ ra ở lần chạy sau khi Google trả nhầm quán.
+
+## Chế độ lô & giao diện (`batch/`, `server/`, `ui/`)
+
+**`data.json` vẫn là nguồn sự thật duy nhất.** SQLite ở `state/vsf.db` chỉ là
+tầng **điều phối + chỉ mục**: xoá lúc nào cũng được, `vsf batch reindex` dựng lại
+toàn bộ từ đĩa. Đừng bao giờ để một dữ kiện POI chỉ tồn tại trong DB.
+
+| Chỗ | Vai trò |
+|---|---|
+| `pipeline.run_record()` | Lõi chạy MỘT POI trên Session **đã mở sẵn** + `on_event`. `run()` chỉ là wrapper mở Session — `vsf run` không đổi hành vi |
+| `errors.py` | `WrongPlaceError` (kế thừa `RuntimeError` để không phá code cũ) + hằng số `FLAG_*` |
+| `POIRecord.flags` | Cờ triage máy đọc được, gom theo bước **y hệt `warnings`** để chạy lại bước là xoá đúng cờ cũ. `warnings` để người đọc, `flags` để lọc |
+| `POIRecord.step_runs` | Thời lượng + `error_code` + **traceback** mỗi bước (trước đây traceback bị vứt) |
+| `POIRecord.overrides` | Sửa tay theo tên cột, `build_row()` áp **CUỐI CÙNG** → chạy lại bước không xoá chỗ đã sửa |
+| `PATCH /jobs/{id}/row` | `null` cho một cột = **xoá** override của cột đó; `""` = **ép cột rỗng**. Gộp hai thứ lại thì nút "về mặc định" của một cột chỉ khoá được cột ở giá trị trống chứ không trả nó về cho pipeline tính |
+| `errors.flags_from_warnings()` | Bắc cầu cờ từ câu cảnh báo tiếng Việt của 141 POI cũ. Chỉ dùng khi `flags` rỗng, **không** ghi ngược vào data.json |
+| `batch/outcome.py` | `derive_status()` — worker và reindex **phải** dùng chung, lệch nhau là reindex âm thầm đổi trạng thái vừa chạy xong |
+| `server/runner.py` | Đúng MỘT lô chạy tại một thời điểm; `start()` ném 409 nếu đã có lô đang chạy |
+
+Quy tắc riêng:
+
+- **Mọi field mới của `POIRecord` bắt buộc có default.** Nạp bằng `cls(**data)`
+  nên thiếu default là vỡ toàn bộ bản ghi cũ.
+- **Không đổi kiểu `steps: dict[str, str]`** — `_skip_reason`, `merge_rows.py`,
+  `rescore_tiktok.py` đều so `== "ok"`.
+- **Bước chưa từng chạy ≠ chưa xong.** `facebook` vắng mặt ở 139 bản ghi cũ; coi
+  đó là "còn dang dở" sẽ đẩy cả trăm POI đã xong ngược về hàng đợi.
+  `derive_status` chỉ xét bước CÓ trong `record.steps`, phần thiếu báo riêng qua
+  `missing_steps()`.
+- **`wrong_place` / `not_food` → `needs_review`, KHÔNG retry.** Chạy lại chỉ đốt
+  thêm một vòng Gemini để nhận đúng kết luận cũ.
+- Tạm dừng/huỷ là **cờ hợp tác**, đọc giữa hai POI — không cắt giữa một lượt Gemini.
+- Chạy lô nên đặt `[browser] bring_to_front = false`, nếu không cửa sổ giật suốt đêm.
+
 ## Tầng xuất dữ liệu (`schema.py`)
 
 `COLUMNS` phải khớp **tuyệt đối** thứ tự 73 cột của dataset. Quy ước đã đối chiếu
@@ -100,6 +175,7 @@ với dòng dữ liệu đúng do người dùng cung cấp:
 | `ward` | Tên phường **sau sáp nhập 2025** — tra `[ward_map]` trong settings; Google vẫn trả tên cũ. Địa chỉ gốc giữ ở `old_address` |
 | `city` | Chuẩn hoá `Khánh Hòa` → `Khánh Hoà` (dataset viết `oà`) |
 | `cover_image_url` / `gallery_urls` | Để **trống** — ảnh chỉ điền vào `raw_*` |
+| `raw_cover_image_url` / `raw_gallery_urls` | Bể ứng viên là **10 ảnh đầu mục "Tất cả"** (`gallery_candidates`, `[gmaps] gallery_candidate_count`); cột chỉ nhận **3** (`GALLERY_URLS_COUNT`). Ảnh **đầu tiên** của mục "Tất cả" CHÍNH LÀ ảnh đại diện → bị loại khỏi ảnh phụ, nên mặc định là ứng viên **#1–#3**. Tick khác đi ở tab **Ảnh** thì lựa chọn vào `overrides["raw_gallery_urls"]` (áp cuối cùng, cào lại `maps` không xoá). Bản ghi cũ chưa có bể ứng viên: vá riêng bằng `vsf photos`, đừng chạy lại cả bước `maps` |
 | `positive/negative_comments` | Mỗi bình luận là **một đoạn văn riêng biệt**, ngăn bởi **một** dòng mới, không bọc nháy kép — `csv.DictWriter` tự quote cả field theo RFC4180 vì nó chứa newline. Xuống dòng **bên trong** một bình luận gốc (review nhiều đoạn) bị gộp thành khoảng trắng — chỉ ranh giới giữa hai bình luận mới xuống dòng. **Tối đa 5** mỗi bên, cắt trần ngay tại tầng xuất (`quoted_comments`) vì bài không có nội dung bị bỏ qua. Ít hơn 5 là bình thường |
 
 ## Môi trường
@@ -146,3 +222,4 @@ với dòng dữ liệu đúng do người dùng cung cấp:
 | Reels của Trang Facebook | **Đừng dùng `search/videos?q=<tên quán>`**: tìm theo từ khoá trả về video của bất kỳ ai nhắc tên đó, nên xác minh Trang xong cũng KHÔNG bảo đảm gì cho video (đã gặp: Trang "mo:sa coffee" xác minh đúng nhưng ra Reel của "Góc Của Mây"). Phải lấy từ tab video của chính Trang: `profile.php?id=<ref>&sk=videos`. |
 | URL Facebook | Nhồi tham số dài **trông như dữ liệu cookie** → công cụ trích xuất có thể chặn output. Cắt query string trước khi log. NHƯNG link Trang là `profile.php?id=<id>` — id nằm TRONG query string, đừng cắt bừa. |
 | `page.url` của Playwright | **Bị cũ** — không phản ánh `history.replaceState` của Google Maps. Luôn dùng `gmaps.current_url(page)` (`location.href`), nếu không mất sạch lat/long/place_id. |
+| `vsf ui` chạy nền khi sửa code | **Không có `--reload`**: tiến trình giữ nguyên module đã import lúc khởi động, trong khi `ui/dist` lại đọc từ đĩa mỗi request. Nên giao diện thì mới mà `build_row` vẫn là bản cũ — đã gặp: tab Ảnh hiện đúng bể 10 ảnh nhưng tick sẵn ảnh lấy từ `photos.secondary` (logic tiền-`gallery_candidates`), trông y hệt một bug chọn sai. Sửa `.py` xong là **khởi động lại server**, và kiểm bằng API chứ đừng kiểm bằng mắt trên trang. |

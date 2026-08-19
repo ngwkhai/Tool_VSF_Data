@@ -8,13 +8,19 @@ from __future__ import annotations
 
 import json
 import re
+import time
+import traceback
 import unicodedata
-from typing import Callable
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
 
 from rich.console import Console
 
+from . import errors
 from .browser import Session
 from .config import output_dir, settings
+from .errors import VsfError, WrongPlaceError
 from .models import PROFILE_FIELDS, POIRecord, parse_profile_block
 from .schema import classify_l1, normalize_l2
 from .paste import paste_images, upload_via_file_input
@@ -136,29 +142,49 @@ def step_gemini1(s: Session, record: POIRecord, poi: str) -> None:
 
     if still_missing:
         record.warn(f"Gemini không cung cấp: {', '.join(still_missing)} (sẽ suy ra khi xuất)")
+        record.flag(errors.FLAG_GEMINI_MISSING_FIELDS)
 
 
-def _reject_wrong_place(data: dict, poi: str) -> None:
+def _reject_wrong_place(data: dict, poi: str, record: POIRecord | None = None) -> None:
     """Chặn hẳn khi Google trả về quán khác. Gọi TRƯỚC khi cào phần đắt tiền.
 
     KHÔNG chỉ cảnh báo: lấy nhầm quán làm sai toàn bộ dòng dữ liệu mà trước đây
     không có dấu hiệu gì rõ ràng (đã gặp: "Greek Cuisine" -> Google trả "Greek
     Kitchen", quán khác ở phố khác, name_match=0.5 lọt qua ngưỡng cũ trong im
     lặng vì so sánh `<` chứ không `<=`).
+
+    **Mở bằng place_id thì KHÔNG chặn.** Cổng này tồn tại để đoán xem Google có
+    trả đúng quán không; mở thẳng bằng place_id là đã biết chắc, không còn gì
+    phải đoán. Vẫn chặn thì tên do người dùng gõ khác tên Google đăng ký (chuyện
+    thường: "Bún Cá Sứa NhaTrang") sẽ bị loại oan — đúng cái POI mà người dùng đã
+    bỏ công tra place_id để bảo đảm lấy đúng.
     """
     cfg = settings()["gmaps"]
     name_score = data.get("name_match")
     addr_score = data.get("address_match")
+
+    if data.get("opened_by_place_id"):
+        if record is not None and name_score is not None and name_score < cfg["name_match_threshold"]:
+            # Không chặn, nhưng cũng không im lặng: tên lệch nhiều vẫn đáng để
+            # người gán nhãn liếc qua khi rà lại.
+            record.warn(
+                f"Mở bằng place_id nên bỏ qua cổng chặn, nhưng tên chỉ khớp "
+                f"{name_score:.0%}: hỏi {poi!r}, Google đăng ký {data.get('name')!r}."
+            )
+        return
+
     problems = []
     if name_score is not None and name_score < cfg["name_match_threshold"]:
         problems.append(f"tên chỉ khớp {name_score:.0%}")
     if addr_score is not None and addr_score < cfg["address_match_threshold"]:
         problems.append(f"địa chỉ chỉ khớp {addr_score:.0%}")
     if problems:
-        raise RuntimeError(
+        raise WrongPlaceError(
             f"CÓ THỂ LẤY NHẦM QUÁN: hỏi {poi!r} nhưng Google trả về {data['name']!r} "
             f"tại {data.get('address')!r} ({'; '.join(problems)}). "
-            "Kiểm tra lại tên/địa chỉ, chạy lại với --address chính xác hơn nếu cần."
+            "Kiểm tra lại tên/địa chỉ, chạy lại với --address chính xác hơn nếu cần.",
+            name_match=name_score,
+            address_match=addr_score,
         )
 
 
@@ -180,12 +206,14 @@ def _reject_non_food(record: POIRecord, data: dict) -> bool:
                 f"category_l1={l1}. Bỏ qua các bước còn lại, row.tsv chỉ có `name`. "
                 "Nếu đây là nhầm lẫn, chạy lại với --force-food."
             )
+            record.flag(errors.FLAG_NOT_FOOD)
             return True
         if not certain:
             record.warn(
                 "Không đọc được nhãn ngành của Google — mặc định coi là FOOD. "
                 "Kiểm tra selector [gmaps].place_category bằng /poi-recon gmaps."
             )
+            record.flag(errors.FLAG_CATEGORY_UNKNOWN)
 
     # Giá trị dự phòng từ nhãn Google; step_gemini1 ghi đè nếu Gemini trả nhãn hợp lệ.
     record.category_l2 = normalize_l2(None, raw, data.get("name", ""))
@@ -206,9 +234,15 @@ def step_maps(s: Session, record: POIRecord, poi: str) -> None:
         for k in ("old_address", "old_ward", "old_ward_source")
     }
 
-    gmaps.open_place(page, poi, address_hint=address_hint)
+    place_id_hint = getattr(record, "place_id_hint", "")
+    gmaps.open_place(page, poi, address_hint=address_hint, place_id=place_id_hint)
 
     data = gmaps.basic_info(page, requested=poi, address_hint=address_hint)
+    # Ghi lại CÁCH mở địa điểm, không chỉ kết quả: cổng chặn bên dưới và người
+    # rà lại về sau đều cần biết dòng này dựa trên danh tính chắc chắn hay dựa
+    # trên phỏng đoán từ tìm kiếm.
+    if place_id_hint:
+        data["opened_by_place_id"] = place_id_hint
     for k, v in preserved_old_address.items():
         if v is not None:
             data[k] = v
@@ -221,7 +255,7 @@ def step_maps(s: Session, record: POIRecord, poi: str) -> None:
     # HAI CỔNG CHẶN, đặt ngay sau basic_info — TRƯỚC khi cào giờ/ảnh/đánh giá/
     # thực đơn. Trước đây kiểm tra "lấy nhầm quán" nằm tận cuối bước nên vẫn cào
     # trọn gói rồi mới vứt đi; giờ sai quán hoặc không phải đồ ăn là dừng ngay.
-    _reject_wrong_place(data, poi)
+    _reject_wrong_place(data, poi, record)
     if _reject_non_food(record, data):
         return
 
@@ -234,6 +268,10 @@ def step_maps(s: Session, record: POIRecord, poi: str) -> None:
     menu = gmaps.menu_photos(page)
     data["menu_photos"] = menu
 
+    # ĐẶT CUỐI CÙNG, sau menu_photos: hàm này mở khung ảnh và KHÔNG quay lại
+    # trang địa điểm, nên mọi thứ cần trang địa điểm phải xong trước.
+    data["gallery_candidates"] = gmaps.gallery_candidates(page)
+
     cfg = settings()["gmaps"]
     if note := data["reviews"].get("note"):
         record.warn(f"Google Maps: {note}")
@@ -241,12 +279,34 @@ def step_maps(s: Session, record: POIRecord, poi: str) -> None:
         record.warn(f"Ảnh thực đơn: {err}")
     if data["hours"].get("incomplete"):
         record.warn("Google Maps: bảng giờ mở cửa không đủ 7 ngày")
+        record.flag(errors.FLAG_HOURS_INCOMPLETE)
+    # Ảnh đại diện đọc hụt là lỗi CÂM: cột raw_cover_image_url rỗng, không cảnh
+    # báo, không cờ (đã gặp ở 8/151 POI). Dựng lại từ ảnh đầu của mục "Tất cả" —
+    # Google xếp đúng ảnh đại diện lên đầu mục đó — và luôn để lại dấu vết.
+    if not data["photos"].get("hero"):
+        fallback = (data["gallery_candidates"].get("images") or [])
+        if fallback:
+            data["photos"]["hero"] = fallback[0]
+            data["photos"]["hero_source"] = "gallery_first"
+            record.warn(
+                "Google Maps: không đọc được ảnh đại diện ở khối header — "
+                "tạm lấy ảnh đầu của mục 'Tất cả', nên xem lại bằng mắt"
+            )
+        else:
+            record.warn("Google Maps: không lấy được ảnh đại diện")
+        record.flag(errors.FLAG_NO_COVER_PHOTO)
+
     n_secondary = len(data["photos"].get("secondary") or [])
     if n_secondary < cfg["secondary_photo_count"]:
         record.warn(
             f"Google Maps: chỉ lấy được {n_secondary}/{cfg['secondary_photo_count']} "
             "ảnh phụ không trùng nhau"
         )
+        record.flag(errors.FLAG_FEW_SECONDARY_PHOTOS)
+    # Gắn cờ ngay ở bước `maps`: cột `menu` để trống là do KHÔNG có ảnh thực đơn,
+    # và điều đó đã biết chắc từ đây — bước `menu` chỉ xác nhận lại.
+    if not (menu.get("images") or []):
+        record.flag(errors.FLAG_NO_MENU_PHOTOS)
 
 
 # Dấu hiệu câu xã giao/diễn giải, không phải địa chỉ.
@@ -473,6 +533,7 @@ def step_old_address(s: Session, record: POIRecord, poi: str) -> None:
                 f"old_address dùng phường {old_ward!r} do Gemini suy đoán — "
                 "nên kiểm tra lại bằng mắt, Gemini hay đoán nhầm phường."
             )
+            record.flag(errors.FLAG_OLD_ADDRESS_GUESSED)
     else:
         # Xoá giá trị của lần chạy trước — để lại dữ liệu rác còn tệ hơn để trống.
         record.google_maps.pop("old_address", None)
@@ -487,6 +548,7 @@ def step_old_address(s: Session, record: POIRecord, poi: str) -> None:
             "Không lấy được tên phường trước sáp nhập từ Gemini "
             f"(trả lời: {answer[:120]!r})"
         )
+        record.flag(errors.FLAG_OLD_ADDRESS_MISSING)
 
 
 def _looks_like_menu_json(answer: str) -> bool:
@@ -508,6 +570,7 @@ def step_menu(s: Session, record: POIRecord, poi: str) -> None:
     urls = (record.google_maps.get("menu_photos") or {}).get("images") or []
     if not urls:
         record.warn("Bỏ qua bước thực đơn: không có ảnh thực đơn nào từ Google Maps")
+        record.flag(errors.FLAG_NO_MENU_PHOTOS)
         record.menu = {"skipped": True, "reason": "không có ảnh thực đơn"}
         return
 
@@ -536,6 +599,7 @@ def step_menu(s: Session, record: POIRecord, poi: str) -> None:
             answer = reformatted
         else:
             record.warn("Định dạng lại vẫn không ra JSON — giữ nguyên câu trả lời gốc trong _raw")
+            record.flag(errors.FLAG_MENU_NOT_JSON)
 
     record.menu = {
         "images_sent": urls,
@@ -558,6 +622,7 @@ def step_tiktok(s: Session, record: POIRecord, poi: str) -> None:
     record.tiktok = candidates
     if not candidates:
         record.warn("TikTok: không tìm được video nào")
+        record.flag(errors.FLAG_TIKTOK_NONE)
         return
 
     threshold = settings()["tiktok"]["confidence_threshold"]
@@ -569,6 +634,7 @@ def step_tiktok(s: Session, record: POIRecord, poi: str) -> None:
             f"TikTok: ứng viên tốt nhất chỉ đạt {best} < {threshold} — "
             f"raw_url sẽ để trống, chọn tay bằng `vsf export --tiktok N`"
         )
+        record.flag(errors.FLAG_TIKTOK_LOW)
 
 
 def step_facebook(s: Session, record: POIRecord, poi: str) -> None:
@@ -583,6 +649,7 @@ def step_facebook(s: Session, record: POIRecord, poi: str) -> None:
     pages = facebook.search_pages(page, poi)
     if not pages:
         record.warn("Facebook: chưa đăng nhập hoặc không có kết quả — bỏ qua")
+        record.flag(errors.FLAG_FACEBOOK_UNAVAILABLE)
         record.facebook = {}
         return
 
@@ -590,6 +657,7 @@ def step_facebook(s: Session, record: POIRecord, poi: str) -> None:
     record.facebook = {"candidates": pages, "verified": verified, "reels": []}
     if not verified:
         record.warn("Facebook: không Trang nào khớp địa chỉ Google — không lấy Reels")
+        record.flag(errors.FLAG_FACEBOOK_UNVERIFIED)
         return
 
     # Chỉ tới đây mới lấy video: Trang đã khớp địa chỉ thì Reels của nó mặc nhiên
@@ -631,64 +699,221 @@ def _skip_reason(record: POIRecord, step: str) -> str | None:
     return None
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# Kiểu của callback tiến độ. Mỗi sự kiện là một dict phẳng, JSON hoá được — để
+# worker của chế độ lô đẩy thẳng ra SSE mà không phải chuyển đổi gì thêm.
+EventHook = Callable[[dict[str, Any]], None]
+
+
+def _emit(on_event: EventHook | None, **payload: Any) -> None:
+    """Bắn sự kiện tiến độ. Callback hỏng KHÔNG được làm hỏng lượt cào.
+
+    Cào một POI tốn nhiều phút và nhiều lượt Gemini; để một lỗi ở tầng hiển thị
+    (SSE đứt, UI đóng giữa chừng) phá cả lượt đó là đánh đổi tồi.
+    """
+    if on_event is None:
+        return
+    try:
+        on_event({"ts": _now(), **payload})
+    except Exception:  # pragma: no cover - chỉ là tầng hiển thị
+        pass
+
+
+def run_record(
+    s: Session,
+    record: POIRecord,
+    poi: str,
+    out: Path,
+    *,
+    only: str | None = None,
+    resume: bool = False,
+    on_event: EventHook | None = None,
+) -> POIRecord:
+    """Chạy các bước cho MỘT POI trên một Session ĐÃ MỞ SẴN.
+
+    Tách khỏi `run()` để chế độ lô dùng chung một kết nối CDP cho cả đợt thay vì
+    connect + `close_stray_tabs()` lại từ đầu mỗi POI.
+
+    `on_event` nhận các sự kiện `step_start` / `step_ok` / `step_failed` /
+    `step_skipped` / `saved`. Đây là chỗ duy nhất trong toàn tool mà tên bước,
+    kết quả, exception và đường dẫn checkpoint cùng nằm trong tầm với.
+    """
+    wanted = [only] if only else STEPS
+
+    for step in wanted:
+        if resume and record.steps.get(step) == "ok":
+            console.print(f"[dim]· {step}: bỏ qua (đã ok)[/]")
+            _emit(on_event, kind="step_skipped", step=step, reason="đã ok")
+            continue
+
+        # `--only <step>` là lệnh chạy ĐÚNG bước đó, kể cả khi phụ thuộc chưa
+        # đủ — dùng để vá lại một bước lẻ. Không áp cổng chặn lên nó.
+        if not only and (reason := _skip_reason(record, step)):
+            record.steps[step] = "skipped"
+            console.print(f"[dim]· {step}: bỏ qua ({reason})[/]")
+            # Lý do bỏ qua trước đây chỉ in ra stdout rồi mất; giờ nó vào cả
+            # step_runs lẫn luồng sự kiện để UI giải thích được ô trống.
+            record.step_runs[step] = {"status": "skipped", "reason": reason, "at": _now()}
+            _emit(on_event, kind="step_skipped", step=step, reason=reason)
+            continue
+
+        console.print(f"[bold cyan]▸ {step}[/] …")
+        record.begin_step(step)
+        started = _now()
+        started_mono = time.monotonic()
+        _emit(on_event, kind="step_start", step=step)
+        run_info: dict[str, Any] = {"status": "running", "started_at": started}
+        try:
+            HANDLERS[step](s, record, poi)
+            record.steps[step] = "ok"
+            run_info["status"] = "ok"
+            console.print(f"  [green]✓ {step}[/]")
+            _emit(on_event, kind="step_ok", step=step, flags=record.flags.get(step, []))
+        except Exception as exc:
+            record.steps[step] = "failed"
+            code = exc.code if isinstance(exc, VsfError) else "error"
+            record.warn(f"{step} lỗi: {type(exc).__name__}: {exc}")
+            # Cờ hoá mã lỗi để triage lọc được cùng một chỗ với các cờ khác.
+            record.flag(code)
+            run_info.update(
+                status="failed",
+                error_code=code,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                # Trước đây traceback bị vứt hẳn — chạy lô qua đêm rồi sáng ra
+                # nhìn một dòng `str(exc)` thì không lần ra được nguyên nhân.
+                traceback=traceback.format_exc(),
+            )
+            console.print(f"  [red]✗ {step}[/]: {exc}")
+            _emit(on_event, kind="step_failed", step=step, error_code=code, error=str(exc))
+        finally:
+            run_info["finished_at"] = _now()
+            run_info["duration_s"] = round(time.monotonic() - started_mono, 1)
+            record.step_runs[step] = run_info
+            # Ghi ngay cả khi bước vừa rồi hỏng -> không mất công đã làm.
+            path = record.save(out)
+            _emit(on_event, kind="saved", step=step, path=str(path))
+
+    # Ghi lần cuối sau vòng lặp. KHÔNG thừa, và cũng KHÔNG được bỏ đi:
+    #
+    # 1. Bước bị bỏ qua `continue` TRƯỚC khối try nên không bao giờ chạm
+    #    `finally` ở trên. Thiếu dòng này thì POI có `maps` hỏng chỉ lưu được
+    #    `{"maps": "failed"}` — 5 dấu "skipped" hiện trên màn hình rồi biến mất,
+    #    và lần đọc lại sau đó tưởng 5 bước đó CHƯA TỪNG chạy (dải 6 bước vẽ sai,
+    #    `missing_steps()` báo nhầm).
+    # 2. Nó cũng là thứ giữ cho hàm này an toàn khi MỌI bước đều bị bỏ qua
+    #    (`--resume` trên bản ghi đã xong): trước đây `path` chỉ được gán trong
+    #    `finally` nên dòng in ở `run()` ném UnboundLocalError.
+    record.save(out)
+
+    return record
+
+
 def run(
     poi: str,
     only: str | None = None,
     resume: bool = False,
     index: int | None = None,
     address: str | None = None,
+    place_id: str | None = None,
     force_food: bool = False,
 ) -> POIRecord:
+    """Chạy một POI, tự mở/đóng Session. Đây là đường vào của `vsf run`."""
     out = output_dir()
+    record = prepare_record(
+        out, poi, index=index, address=address, place_id=place_id, force_food=force_food
+    )
+
+    with Session() as s:
+        run_record(s, record, poi, out, only=only, resume=resume)
+
+    console.print(f"\nĐã ghi [bold]{out / record.slug / 'data.json'}[/]")
+    console.print(f"Đã ghi [bold]{export_row(record, out=out)}[/]")
+    return record
+
+
+def prepare_record(
+    out: Path,
+    poi: str,
+    *,
+    index: int | None = None,
+    address: str | None = None,
+    place_id: str | None = None,
+    force_food: bool = False,
+) -> POIRecord:
+    """Nạp (hoặc tạo) bản ghi và áp các cờ chỉ có hiệu lực cho lần chạy này."""
     record = POIRecord.load_or_new(out, poi, index=index)
     if address:
         record.address_hint = address
+    if place_id:
+        record.place_id_hint = place_id
     record.force_food = force_food
     if force_food and record.category_l1 and record.category_l1 != "FOOD":
         # Xoá kết luận non-FOOD của lần chạy trước, nếu không cổng dưới đây chặn
         # ngay từ bước `maps` và --force-food thành vô nghĩa.
         record.category_l1 = ""
-    wanted = [only] if only else STEPS
-
-    with Session() as s:
-        for step in wanted:
-            if resume and record.steps.get(step) == "ok":
-                console.print(f"[dim]· {step}: bỏ qua (đã ok)[/]")
-                continue
-
-            # `--only <step>` là lệnh chạy ĐÚNG bước đó, kể cả khi phụ thuộc chưa
-            # đủ — dùng để vá lại một bước lẻ. Không áp cổng chặn lên nó.
-            if not only and (reason := _skip_reason(record, step)):
-                record.steps[step] = "skipped"
-                console.print(f"[dim]· {step}: bỏ qua ({reason})[/]")
-                continue
-
-            console.print(f"[bold cyan]▸ {step}[/] …")
-            record.begin_step(step)
-            try:
-                HANDLERS[step](s, record, poi)
-                record.steps[step] = "ok"
-                console.print(f"  [green]✓ {step}[/]")
-            except Exception as exc:
-                record.steps[step] = "failed"
-                record.warn(f"{step} lỗi: {type(exc).__name__}: {exc}")
-                console.print(f"  [red]✗ {step}[/]: {exc}")
-            finally:
-                # Ghi ngay cả khi bước vừa rồi hỏng -> không mất công đã làm.
-                path = record.save(out)
-
-    console.print(f"\nĐã ghi [bold]{path}[/]")
-    console.print(f"Đã ghi [bold]{export_row(record)}[/]")
     return record
 
 
-def export_row(record: POIRecord, tiktok_index: int = 0):
-    """Xuất row.tsv đúng 73 cột — đây mới là output chính thức để nạp dataset."""
+def refresh_photos(s: Session, record: POIRecord, out: Path) -> dict[str, Any]:
+    """Cào lại RIÊNG khối ảnh của một bản ghi đã có, không đụng bước nào khác.
+
+    Chạy lại cả bước `maps` cũng ra kết quả này, nhưng phải cào lại giờ mở cửa,
+    10 bài đánh giá và ảnh thực đơn — vài phút mỗi POI, cho 151 POI thì không
+    đáng chỉ để vá một cột ảnh. Ở đây chỉ mở đúng trang địa điểm rồi đọc ảnh.
+
+    Ưu tiên mở bằng `place_url` đã lưu: nó trỏ thẳng địa điểm cũ nên bỏ qua được
+    toàn bộ khâu tìm kiếm — và cùng với đó là rủi ro lần này Google trả về một
+    quán trùng tên KHÁC, âm thầm dán ảnh quán khác vào bản ghi.
+    """
+    page = s.page("gmaps")
+    maps = record.google_maps or {}
+    place_url = maps.get("place_url") or ""
+    place_id = getattr(record, "place_id_hint", "") or maps.get("place_id") or ""
+
+    if place_url:
+        page.goto(place_url, wait_until="domcontentloaded")
+        page.wait_for_timeout(3500)
+    else:
+        gmaps.open_place(
+            page, record.poi_name, address_hint=record.address_hint, place_id=place_id
+        )
+
+    before = dict((maps.get("photos") or {}))
+    maps["photos"] = gmaps.photos(page)
+    maps["gallery_candidates"] = gmaps.gallery_candidates(page)
+
+    if not maps["photos"].get("hero"):
+        fallback = maps["gallery_candidates"].get("images") or []
+        if fallback:
+            maps["photos"]["hero"] = fallback[0]
+            maps["photos"]["hero_source"] = "gallery_first"
+
+    record.google_maps = maps
+    record.save(out)
+    export_row(record, out=out)
+    return {
+        "hero_before": before.get("hero"),
+        "hero_after": maps["photos"].get("hero"),
+        "candidates": len(maps["gallery_candidates"].get("images") or []),
+        "error": maps["gallery_candidates"].get("error"),
+    }
+
+
+def export_row(record: POIRecord, tiktok_index: int = 0, out: Path | None = None):
+    """Xuất row.tsv đúng 73 cột — đây mới là output chính thức để nạp dataset.
+
+    `out` để gọi được mà không phụ thuộc global `config._OUTPUT_OVERRIDE`; bỏ
+    trống thì vẫn lấy thư mục output hiện hành như cũ.
+    """
     import csv
 
     from .schema import COLUMNS, build_row
 
-    out = output_dir()
+    out = out or output_dir()
     row = build_row(
         record,
         settings().get("dataset", {}),

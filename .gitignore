@@ -11,7 +11,16 @@ output*/
 them/
 scratch/
 
+# Giao diện: nguồn được theo dõi, phần cài đặt và bản build thì không.
+# Dựng lại bằng: cd ui && npm install && npm run build
+ui/node_modules/
+ui/dist/
+
 # Rác cục bộ
 .DS_Store
 *.zip
 .claude/scheduled_tasks.lock
+
+# Hàng đợi lô. Chỉ là CHỈ MỤC — data.json trên đĩa mới là nguồn sự thật.
+# Xoá lúc nào cũng được, `vsf batch reindex` dựng lại toàn bộ.
+state/

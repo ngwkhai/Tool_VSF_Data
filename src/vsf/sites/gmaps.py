@@ -217,15 +217,28 @@ def address_match(hint: str, found: str) -> float:
 # -- Mở trang địa điểm -----------------------------------------------------
 
 
-def open_place(page: Page, poi: str, address_hint: str = "") -> str:
+def place_id_url(place_id: str) -> str:
+    """URL mở THẲNG một địa điểm theo place_id, không qua bước tìm kiếm."""
+    return f"https://www.google.com/maps/place/?q=place_id:{quote(place_id, safe='')}&hl=vi"
+
+
+def open_place(page: Page, poi: str, address_hint: str = "", place_id: str = "") -> str:
     """Tìm POI rồi mở trang chi tiết. Trả về URL trang địa điểm.
 
-    Đi qua href của kết quả đầu thay vì click vào nó: điều hướng trực tiếp ổn
-    định hơn hẳn so với click vào danh sách kết quả của SPA.
+    Có `place_id` thì đi thẳng tới đúng địa điểm đó — bỏ qua hoàn toàn khâu tìm
+    kiếm, và cùng với nó là cả lớp lỗi "Google trả nhầm quán trùng tên". Đây là
+    cách neo mạnh nhất có thể có, mạnh hơn hẳn ghép tên đường vào truy vấn.
+
+    Không có place_id thì tìm như cũ, và đi qua href của kết quả đầu thay vì
+    click vào nó: điều hướng trực tiếp ổn định hơn hẳn so với click vào danh
+    sách kết quả của SPA.
     """
     cfg = settings()["gmaps"]
-    query = search_query(poi, cfg.get("search_region", ""), address_hint)
-    url = cfg["search_url"].format(query=quote(query, safe=""))
+    if place_id:
+        url = place_id_url(place_id)
+    else:
+        query = search_query(poi, cfg.get("search_region", ""), address_hint)
+        url = cfg["search_url"].format(query=quote(query, safe=""))
     page.goto(url, wait_until="domcontentloaded", timeout=90_000)
 
     title_css = sel("gmaps", "place_title")
@@ -386,13 +399,39 @@ def opening_hours(page: Page) -> dict[str, Any]:
 # -- Ảnh -------------------------------------------------------------------
 
 
+def hero_src(page: Page, timeout: float = 12.0) -> str | None:
+    """`src` của ảnh đại diện (avatar) trong khối header, hoặc None.
+
+    PHẢI CHỜ, không đọc một phát rồi bỏ cuộc. `_first_present` chỉ gọi
+    `count()` nên trả None ngay lập tức nếu khối header chưa render; và ngay cả
+    khi thẻ <img> đã có, `src` vẫn có thể còn rỗng vài trăm ms vì Google nạp lười
+    (thẻ được dựng trước, `src` gán sau). Đọc sớm ở một trong hai trạng thái đó
+    thì `hero` = None mà KHÔNG có lỗi nào — đúng 8/151 POI cũ mất
+    raw_cover_image_url trong im lặng theo cách này.
+
+    Chỉ chấp nhận URL googleusercontent: ảnh Street View
+    (streetviewpixels-pa.googleapis.com) không phải ảnh của quán.
+    """
+    def read() -> str | None:
+        loc = _first_present(page, sel_list("gmaps", "hero_image"))
+        if loc is None:
+            return None
+        src = loc.first.get_attribute("src") or ""
+        return src if "googleusercontent" in src else None
+
+    try:
+        wait_until(lambda: read() is not None, timeout=timeout, what="ảnh đại diện")
+    except TimeoutError:
+        return None
+    return read()
+
+
 def photos(page: Page) -> dict[str, Any]:
     """Ảnh đại diện + N ảnh phụ. Chỉ trả URL, không tải file."""
     cfg = settings()["gmaps"]
     size = cfg["image_size"]
 
-    hero_loc = _first_present(page, sel_list("gmaps", "hero_image"))
-    hero_raw = hero_loc.first.get_attribute("src") if hero_loc else None
+    hero_raw = hero_src(page)
     hero_base = hero_raw.split("=")[0] if hero_raw else None
 
     tiles = page.locator(sel("gmaps", "secondary_image"))
@@ -588,6 +627,61 @@ def _collect_gallery_images(page: Page, limit: int, size: int) -> list[str]:
         page.wait_for_timeout(1400)
 
     return seen[:limit]
+
+
+def gallery_candidates(page: Page, limit: int | None = None) -> dict[str, Any]:
+    """N ảnh đầu của mục "Tất cả" trong gallery — bể ứng viên để người chọn tay.
+
+    KHÁC hẳn `photos()["secondary"]`: `img.DaSXdd` mà `secondary` đọc KHÔNG phải
+    ảnh phụ của quán, mà là ảnh bìa đại diện cho từng MỤC ảnh ("Thực đơn", "Chế
+    độ xem Phố và 360°", ...) nằm cuối khung thông tin — nên nó vừa ít, vừa lẫn
+    Street View, vừa không phản ánh ảnh đẹp nhất của quán. Muốn 10 ảnh thật thì
+    phải mở gallery ra như bước lấy ảnh thực đơn.
+
+    Ảnh ĐẦU TIÊN của mục "Tất cả" chính là ảnh đại diện (đã đối chiếu trùng khớp
+    `hero` trên trang thật) -> dùng được làm dự phòng khi header không đọc được.
+
+    Hàm này ĐIỀU HƯỚNG sang khung ảnh và không quay lại — gọi nó ở CUỐI bước
+    maps, sau `menu_photos()`.
+    """
+    cfg = settings()["gmaps"]
+    limit = limit or cfg["gallery_candidate_count"]
+    out: dict[str, Any] = {"images": [], "category_used": None}
+
+    # Nút mở gallery chỉ có ở tab Tổng quan (xem menu_photos).
+    overview = page.locator(sel("gmaps", "tab_overview"))
+    if overview.count():
+        try:
+            overview.first.click(timeout=8000)
+            page.wait_for_timeout(1500)
+        except Exception:
+            pass
+
+    button = _first_present(page, sel_list("gmaps", "photos_button"))
+    if button is None:
+        out["error"] = "Không tìm thấy nút mở gallery ảnh"
+        return out
+    _click_retrying(button)
+    page.wait_for_timeout(3000)
+
+    chips = _first_present(page, sel_list("gmaps", "photo_category"))
+    if chips is not None:
+        for i in range(chips.count()):
+            chip = chips.nth(i)
+            label = (chip.get_attribute("aria-label") or "").strip() or chip.inner_text().strip()
+            if label.lower().startswith(("tất cả", "all")):
+                try:
+                    chip.click(timeout=8000)
+                    page.wait_for_timeout(2000)
+                    out["category_used"] = label
+                except Exception:
+                    pass
+                break
+
+    out["images"] = _collect_gallery_images(page, limit, cfg["image_size"])
+    if not out["images"]:
+        out["error"] = "Gallery mở nhưng không đọc được ảnh nào"
+    return out
 
 
 # -- Bài đánh giá ----------------------------------------------------------

@@ -9,6 +9,14 @@ dependencies = [
     "rich>=13.9",
 ]
 
+# Giao diện quản lý là phần TUỲ CHỌN: `vsf run`/`vsf batch` chạy được với đúng 3
+# dependency ở trên. Cài thêm khi cần giao diện: `uv pip install -e ".[ui]"`
+[project.optional-dependencies]
+ui = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
+
 [project.scripts]
 vsf = "vsf.cli:app"
 
@@ -20,4 +28,6 @@ build-backend = "hatchling.build"
 packages = ["src/vsf"]
 
 [dependency-groups]
-dev = ["pytest>=8.3"]
+# httpx2: starlette.testclient cần nó để test tầng API. Thiếu thì tests/test_api.py
+# tự bỏ qua chứ không làm đỏ cả bộ test.
+dev = ["pytest>=8.3", "httpx2>=2.12"]

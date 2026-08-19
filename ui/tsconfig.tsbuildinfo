@@ -1,0 +1,1 @@
+{"root":["./src/api.ts","./src/hooks.ts","./src/main.tsx","./src/types.ts","./src/components/jobtable.tsx","./src/components/layout.tsx","./src/components/ui.tsx","./src/pages/batchdetail.tsx","./src/pages/batches.tsx","./src/pages/dashboard.tsx","./src/pages/doctor.tsx","./src/pages/jobdetail.tsx","./src/pages/triage.tsx","./vite.config.ts"],"version":"5.9.3"}

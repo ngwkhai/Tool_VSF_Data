@@ -1,0 +1,259 @@
+@import "tailwindcss";
+
+/* Bảng token dựng theo tinh thần bảng màu tối của Grafana — viết tay, không nhập
+   package nào của họ. Nền rất tối và chữ hơi ngả xanh là hai thứ làm nên cảm
+   giác "bảng điều khiển quan sát" hơn là "trang web tối màu". */
+@theme {
+  --color-canvas: #111217;
+  --color-panel: #181b1f;
+  --color-raised: #22252b;
+  --color-line: #2e3038;
+  --color-line-soft: #24262b;
+
+  /* Chữ sáng hơn bản đầu: cỡ chữ đã tăng thì độ tương phản thấp không còn là
+     "tinh tế" mà thành mỏi mắt — đây là màn hình người ta nhìn hàng giờ. */
+  --color-ink: #dcdde8;
+  --color-ink-dim: #9b9caa;
+  --color-ink-faint: #6d7079;
+
+  --color-brand: #3d71d9;
+  --color-brand-lit: #6e9fff;
+  --color-good: #1a7f4b;
+  --color-good-lit: #6ccf8e;
+  --color-bad: #c4162a;
+  --color-bad-lit: #ff5286;
+  --color-warn: #b2851a;
+  --color-warn-lit: #ff9830;
+  --color-idle: #3f434a;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  /* 15px thay cho 13px. Vẫn là giao diện điều khiển đọc theo hàng, nhưng bảng
+     ở đây dài chừng vài chục dòng chứ không phải vài nghìn — nhồi chữ nhỏ chỉ
+     đổi lấy vài hàng cuộn, mà trả bằng việc phải nheo mắt suốt buổi. */
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Số liệu luôn dùng chữ đều bề rộng: cột số nhảy loạn giữa các hàng làm việc so
+   sánh bằng mắt trở nên bất khả thi. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #33363d;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #52565f;
+  background-clip: padding-box;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brand-lit);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-brand) 45%, transparent);
+  color: #fff;
+}
+
+/* ------------------------------------------------------------- Hiệu ứng ---
+ *
+ * Ba loại chuyển động, mỗi loại một việc:
+ *   - `rise`  : nội dung vừa tải xong hiện lên, mắt biết chỗ nào là mới.
+ *   - `pulse` : worker còn sống.
+ *   - `sweep` : có việc đang chạy mà chưa biết bao lâu nữa xong.
+ * Không có loại thứ tư. Chuyển động thêm nữa chỉ là nhiễu.
+ */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Dùng cho khối vừa vào khung nhìn. `--d` cho phép xếp so le theo thứ tự đọc. */
+.anim-rise {
+  animation: rise 0.32s cubic-bezier(0.22, 0.8, 0.35, 1) both;
+  animation-delay: var(--d, 0s);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.anim-fade {
+  animation: fade-in 0.25s ease-out both;
+  animation-delay: var(--d, 0s);
+}
+
+/* Nhịp đập của chấm "đang chạy" — dấu hiệu sống duy nhất trên trang, nên nó
+   phải là thứ đập vào mắt đầu tiên khi worker còn làm việc. */
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.3;
+    transform: scale(0.75);
+  }
+}
+.pulse-dot {
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+/* Vòng sáng lan ra từ chấm đang chạy: nhìn thấy được từ đuôi mắt, khác với
+   chấm nhấp nháy vốn phải nhìn thẳng mới nhận ra. */
+@keyframes halo {
+  0% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(2.6);
+  }
+}
+.pulse-halo::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: halo 1.8s ease-out infinite;
+}
+
+/* Dải sáng chạy ngang — dùng cho thanh tiến độ của việc đang chạy và cho khung
+   xương lúc chờ dữ liệu. */
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+.sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, #fff 22%, transparent),
+    transparent
+  );
+  animation: sweep 1.6s ease-in-out infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.anim-spin {
+  animation: spin 0.7s linear infinite;
+}
+
+/* Khung xương lúc chờ: nền nhấp nháy nhẹ, không đảo màu để khỏi giật mắt. */
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.75;
+  }
+}
+.anim-breathe {
+  animation: breathe 1.5s ease-in-out infinite;
+}
+
+/* Khối bấm được nhấc lên rất nhẹ khi rê chuột và lún xuống khi bấm. Biên độ cố
+   ý nhỏ: đây là phản hồi xúc giác, không phải hoạt cảnh. */
+.lift {
+  transition:
+    transform 0.16s ease,
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+.lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px -8px rgb(0 0 0 / 0.7);
+}
+.lift:active {
+  transform: translateY(0);
+}
+
+/* Hàng bảng: gạch màu trượt vào từ mép trái khi rê chuột, thay cho việc chỉ đổi
+   nền — mắt bắt được hàng đang trỏ ngay cả khi bảng dài.
+ *
+ * Vẽ bằng background-image chứ KHÔNG bằng `::before`. Pseudo-element của một
+ * `<tr>` bị bọc thành một ô bảng ẩn danh, tức là thêm hẳn một cột: `<thead>` có
+ * 5 cột còn mỗi hàng body thành 6, và toàn bộ body lệch sang phải một cột. Lỗi
+ * này trông y hệt một lỗi tính bề rộng cột nên rất dễ đi sửa sai chỗ.
+ */
+.row-hover {
+  transition:
+    background-color 0.15s ease,
+    background-size 0.18s ease;
+  background-image: linear-gradient(var(--color-brand-lit), var(--color-brand-lit));
+  background-repeat: no-repeat;
+  background-position: left center;
+  background-size: 2px 0%;
+}
+.row-hover:hover {
+  background-size: 2px 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .lift:hover {
+    transform: none;
+  }
+}

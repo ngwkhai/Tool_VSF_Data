@@ -24,6 +24,18 @@ keep_open = true
 # Đóng tab trắng và tab trùng slot còn sót từ lần chạy trước. Tool nhận lại tab cũ
 # theo URL, nên tab thừa chỉ tốn RAM chứ không dùng vào việc gì.
 close_stray_tabs = true
+# Kéo tab lên trước mỗi lần điều hướng. Tiện khi chạy một POI và ngồi xem, nhưng
+# chạy lô 30 POI thì cửa sổ giật liên tục hàng giờ — đặt false để chạy nền.
+bring_to_front = false
+
+# Chế độ chạy lô (`vsf batch`).
+[batch]
+# Số lần thử tối đa cho một POI. CHỈ áp dụng cho lỗi tạm thời (timeout, mất mạng);
+# "lấy nhầm quán" và "không phải FOOD" đi thẳng vào needs_review vì chạy lại cũng
+# ra đúng kết luận cũ, chỉ tốn thêm một vòng Gemini.
+max_attempts = 2
+# Nghỉ giữa hai POI (giây). Cào liên tục không nghỉ dễ ăn rate-limit của Google.
+delay_between = 3.0
 
 [gemini]
 # Hai thread chat có sẵn của bạn. Giữ nguyên URL để không mất ngữ cảnh hội thoại.
@@ -194,6 +206,10 @@ name_match_threshold = 0.6
 # tìm được. Chỉ áp dụng khi có --address; thấp hơn -> CHẶN bước maps.
 address_match_threshold = 0.5
 secondary_photo_count = 3
+# Số ảnh lấy từ mục "Tất cả" của gallery để người gán nhãn tick chọn 3 ảnh cho
+# raw_gallery_urls (tab "Ảnh" trong giao diện). Nhiều hơn 10 thì phải cuộn thêm
+# vòng nữa mà lợi ích không đáng — 10 ảnh đầu đã là ảnh Google xếp trên cùng.
+gallery_candidate_count = 10
 # Gemini chỉ nhận tối đa 10 ảnh đính kèm mỗi lượt — gửi nhiều hơn thì phần dư bị
 # lặng lẽ bỏ qua (đã kiểm chứng 2026-08-11: gửi 20, Gemini chỉ thấy menu_01..10).
 max_menu_images = 10

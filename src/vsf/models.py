@@ -153,6 +153,10 @@ class POIRecord:
     # Rỗng thì bỏ qua bước đối chiếu này. Lưu lại để --resume/--only không cần
     # truyền lại --address mỗi lần.
     address_hint: str = ""
+    # Google place_id do người dùng cung cấp sẵn (dán kèm danh sách POI). Neo
+    # MẠNH hơn hẳn address_hint: mở thẳng đúng địa điểm thay vì tìm theo tên rồi
+    # đối chiếu. Lưu lại để --resume/--only không cần truyền lại.
+    place_id_hint: str = ""
     # Phân loại chốt ở bước `maps` (l1) và `gemini1` (l2) — xem schema.classify_l1
     # / schema.normalize_l2. `category_l1` != "FOOD" là tín hiệu dừng pipeline:
     # các bước sau bị bỏ qua và row.tsv chỉ còn `name` + `category_l1`.
@@ -164,10 +168,27 @@ class POIRecord:
     created_at: str = ""
     updated_at: str = ""
     # Trạng thái từng bước: pending | ok | failed | skipped
+    # GIỮ NGUYÊN kiểu chuỗi. `_skip_reason`, scripts/merge_rows.py và
+    # scripts/rescore_tiktok.py đều so sánh `== "ok"` — đổi sang dict là vỡ hết.
+    # Chi tiết lần chạy đi vào `step_runs` bên dưới.
     steps: dict[str, str] = field(default_factory=dict)
     # Cảnh báo gom theo bước, để chạy lại một bước thì xoá đúng cảnh báo cũ của
     # bước đó chứ không kéo lê cảnh báo đã hết hiệu lực sang lần chạy sau.
     warnings: dict[str, list[str]] = field(default_factory=dict)
+    # Chi tiết lần chạy gần nhất của mỗi bước: thời điểm, thời lượng, và khi hỏng
+    # thì cả traceback. Trước đây traceback bị vứt (`except Exception as exc` chỉ
+    # giữ `str(exc)`), gỡ lỗi một bước hỏng lúc chạy lô qua đêm là bất khả thi.
+    #   {"maps": {started_at, finished_at, duration_s,
+    #             error_code, error_type, error_message, traceback}}
+    step_runs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Cờ triage máy đọc được (xem errors.FLAG_*), song song với `warnings`.
+    # `warnings` để người đọc, `flags` để lọc — không cái nào thay thế cái nào.
+    # Gom theo bước Y HỆT `warnings`, vì cùng một lý do: chạy lại `maps` phải xoá
+    # cờ `hours_incomplete` của lần trước, không kéo lê cờ đã hết hiệu lực.
+    flags: dict[str, list[str]] = field(default_factory=dict)
+    # Sửa tay từ giao diện, khoá theo tên cột trong schema.COLUMNS.
+    # build_row() áp CUỐI CÙNG, nên chạy lại một bước không xoá mất chỗ đã sửa.
+    overrides: dict[str, str] = field(default_factory=dict)
 
     gemini_profile: dict[str, Any] = field(default_factory=dict)
     google_maps: dict[str, Any] = field(default_factory=dict)
@@ -191,17 +212,32 @@ class POIRecord:
         self.force_food = False
 
     def begin_step(self, step: str) -> None:
-        """Đánh dấu bước đang chạy và xoá cảnh báo cũ của chính bước đó."""
+        """Đánh dấu bước đang chạy, xoá cảnh báo + cờ cũ của chính bước đó."""
         self.current_step = step
         self.warnings.pop(step, None)
+        self.flags.pop(step, None)
 
     def warn(self, message: str) -> None:
         bucket = self.warnings.setdefault(self.current_step, [])
         if message not in bucket:
             bucket.append(message)
 
+    def flag(self, code: str) -> None:
+        """Gắn cờ triage cho bước đang chạy. Đi kèm `warn()`, không thay thế nó."""
+        bucket = self.flags.setdefault(self.current_step, [])
+        if code not in bucket:
+            bucket.append(code)
+
     def all_warnings(self) -> list[str]:
         return [f"[{step}] {m}" for step, msgs in self.warnings.items() for m in msgs]
+
+    def all_flags(self) -> list[str]:
+        """Cờ của mọi bước, khử trùng lặp, giữ thứ tự xuất hiện."""
+        seen: dict[str, None] = {}
+        for codes in self.flags.values():
+            for code in codes:
+                seen.setdefault(code, None)
+        return list(seen)
 
     # -- lưu / nạp -----------------------------------------------------
 
@@ -234,6 +270,20 @@ class POIRecord:
             json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8"
         )
         return path
+
+    @classmethod
+    def load_folder(cls, folder: Path) -> "POIRecord":
+        """Nạp thẳng từ một thư mục POI đã biết.
+
+        `load_or_new` đi từ TÊN POI nên không dùng được để quét thư mục: tên thư
+        mục đã đánh số ("7_bun-bo-tung-hoang") slugify ra "7-bun-bo-tung-hoang",
+        không khớp lại chính nó, và hàm đó lặng lẽ trả về một bản ghi RỖNG mới.
+        """
+        data = json.loads((folder / "data.json").read_text(encoding="utf-8"))
+        data.pop("slug", None)
+        record = cls(**data)
+        record.slug = folder.name
+        return record
 
     @classmethod
     def load_or_new(cls, output_dir: Path, poi_name: str, index: int | None = None) -> "POIRecord":

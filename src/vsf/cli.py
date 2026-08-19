@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import typer
 from rich.console import Console
 from rich.markup import escape
@@ -11,6 +13,8 @@ from . import browser, pipeline
 from .config import settings
 
 app = typer.Typer(add_completion=False, help="Tool gán nhãn & tăng cường dữ liệu POI")
+batch_app = typer.Typer(add_completion=False, help="Chạy theo lô: nạp danh sách, chạy, theo dõi")
+app.add_typer(batch_app, name="batch")
 console = Console()
 
 
@@ -128,6 +132,87 @@ def export(
 
 
 @app.command()
+def photos(
+    poi: str = typer.Argument(
+        None, help="Tên POI. Bỏ trống = quét cả thư mục kết quả."
+    ),
+    out_dir: str = typer.Option(
+        None, "--out", help="Thư mục kết quả (vd: output_18_8). Mặc định: output/"
+    ),
+    missing_only: bool = typer.Option(
+        True,
+        "--missing-only/--all",
+        help="Chỉ vá bản ghi thiếu ảnh đại diện hoặc chưa có bể 10 ảnh gallery",
+    ),
+    limit: int = typer.Option(None, "--limit", help="Dừng sau N bản ghi"),
+) -> None:
+    """Cào lại RIÊNG ảnh đại diện + 10 ảnh gallery, không chạy lại bước nào khác.
+
+    Dùng để vá các bản ghi cũ mất `raw_cover_image_url` mà không phải đốt lại
+    toàn bộ bước `maps` (giờ mở cửa, 10 bài đánh giá, ảnh thực đơn).
+    """
+    from .browser import Session
+    from .config import output_dir, set_output_dir
+    from .models import POIRecord
+
+    set_output_dir(out_dir)
+    out = output_dir()
+
+    if poi:
+        if not POIRecord.path_for(out, poi).exists():
+            console.print(f"[red]Chưa có dữ liệu cho {poi!r}.[/]")
+            raise typer.Exit(1)
+        folders = [POIRecord.path_for(out, poi).parent]
+    else:
+        folders = sorted(p.parent for p in out.glob("*/data.json"))
+
+    todo = []
+    for folder in folders:
+        record = POIRecord.load_folder(folder)
+        maps = record.google_maps or {}
+        # Stub non-FOOD không có cột ảnh nào để vá — bỏ qua, đừng đốt một lượt mở
+        # trang chỉ để ghi lại đúng dòng stub cũ.
+        if record.category_l1 and record.category_l1 != "FOOD":
+            continue
+        needs = not (maps.get("photos") or {}).get("hero") or not (
+            (maps.get("gallery_candidates") or {}).get("images")
+        )
+        if missing_only and not needs:
+            continue
+        todo.append(record)
+
+    if limit:
+        todo = todo[:limit]
+    if not todo:
+        console.print("[green]Không có bản ghi nào cần vá ảnh.[/]")
+        return
+
+    console.print(f"Sẽ vá ảnh cho [bold]{len(todo)}[/] bản ghi trong {out}\n")
+    table = Table()
+    table.add_column("POI")
+    table.add_column("Đại diện")
+    table.add_column("Ứng viên")
+
+    with Session() as s:
+        for record in todo:
+            try:
+                info = pipeline.refresh_photos(s, record, out)
+            except Exception as exc:  # một POI hỏng không được chặn cả loạt
+                table.add_row(record.slug, f"[red]lỗi[/] {escape(str(exc)[:60])}", "-")
+                continue
+            mark = (
+                "[green]✓[/]"
+                if info["hero_after"] and not info["hero_before"]
+                else "[green]ok[/]"
+                if info["hero_after"]
+                else "[red]vẫn trống[/]"
+            )
+            table.add_row(record.slug, mark, str(info["candidates"]))
+
+    console.print(table)
+
+
+@app.command()
 def login() -> None:
     """Mở Chrome (profile riêng của tool) để bạn đăng nhập Google + TikTok + Facebook."""
     port = settings()["browser"]["cdp_port"]
@@ -155,96 +240,276 @@ def login() -> None:
 @app.command()
 def doctor() -> None:
     """Kiểm tra môi trường: profile, đăng nhập, 2 chat Gemini có truy cập được không."""
-    cfg = settings()
-    # (nhãn, ok, chi tiết, tuỳ chọn?). Cờ riêng chứ KHÔNG nhúng "[tuỳ chọn]" vào
-    # nhãn: Rich hiểu ngoặc vuông là thẻ markup và nuốt mất tiền tố.
-    rows: list[tuple[str, bool, str, bool]] = []
+    from . import health
 
-    with browser.Session() as s:
-        rows.append(("Chrome + cổng CDP", True, f"cổng {cfg['browser']['cdp_port']}", False))
-
-        for slot, key, label in [
-            ("gemini_profile", "profile_chat_url", "Gemini chat #1 (hồ sơ POI)"),
-            ("gemini_menu", "menu_chat_url", "Gemini chat #2 (thực đơn)"),
-        ]:
-            page = s.goto(slot, cfg["gemini"][key], force=True)
-            page.wait_for_timeout(2500)
-            signed_in = "accounts.google.com" not in page.url
-            has_editor = page.locator("rich-textarea, [contenteditable='true']").count() > 0
-            ok = signed_in and has_editor
-            detail = (
-                "OK"
-                if ok
-                else ("chưa đăng nhập Google" if not signed_in else "không thấy ô nhập")
-            )
-            rows.append((label, ok, detail, False))
-
-        page = s.goto("tiktok", "https://www.tiktok.com/", force=True)
-        page.wait_for_timeout(2500)
-        # Phải soi đúng phần tử captcha. Chuỗi "captcha" luôn có trong JS bundle
-        # của TikTok kể cả khi không hề bị chặn -> tìm trong page source là báo
-        # động giả.
-        from .config import sel
-
-        blocked = page.locator(sel("tiktok", "captcha")).count() > 0
-        rows.append(
-            ("TikTok truy cập được", not blocked, "bị chặn/captcha" if blocked else "OK", False)
-        )
-
-        # Tab "Người dùng" — nguồn tài khoản chính chủ — CHỈ chạy khi đã đăng nhập.
-        # Không đăng nhập thì tool vẫn chạy được (khớp tên vẫn nhận ra phần lớn tài
-        # khoản chính chủ), chỉ mất phần gỡ được POI tên Nga/Hàn.
-        tiktok_signed_in = "Đăng nhập" not in page.locator("body").inner_text()
-        rows.append(
-            (
-                "TikTok đăng nhập (tab Người dùng)",
-                tiktok_signed_in,
-                "OK"
-                if tiktok_signed_in
-                else "chưa đăng nhập — mất tín hiệu tài khoản chính chủ",
-                True,
-            )
-        )
-
-        page = s.goto("facebook", "https://www.facebook.com/", force=True)
-        page.wait_for_timeout(2500)
-        from .sites import facebook as fb
-
-        signed_in = fb.logged_in(page)
-        rows.append(
-            (
-                "Facebook đăng nhập",
-                signed_in,
-                "OK" if signed_in else "chưa đăng nhập — bước facebook sẽ bị bỏ qua",
-                True,
-            )
-        )
+    checks = health.check_all()
 
     table = Table(title="vsf doctor")
     table.add_column("Kiểm tra")
     table.add_column("Kết quả")
     table.add_column("Chi tiết")
-    for label, ok, detail, optional in rows:
-        if ok:
-            mark = "[green]✓[/]"
-        else:
-            mark = "[yellow]—[/]" if optional else "[red]✗[/]"
-        table.add_row(f"{label} (tuỳ chọn)" if optional else label, mark, detail)
+    for c in checks:
+        # Cờ riêng chứ KHÔNG nhúng "[tuỳ chọn]" vào nhãn: Rich hiểu ngoặc vuông
+        # là thẻ markup và nuốt mất tiền tố.
+        mark = "[green]✓[/]" if c.ok else ("[yellow]—[/]" if c.optional else "[red]✗[/]")
+        table.add_row(f"{c.label} (tuỳ chọn)" if c.optional else c.label, mark, c.detail)
     console.print(table)
 
-    # Mục "[tuỳ chọn]" hỏng KHÔNG phải lỗi môi trường: pipeline vẫn chạy đủ, chỉ
-    # mất phần tăng cường. Tính chúng vào điều kiện thoát là báo động giả, và
-    # doctor kêu sói thì lần sau không ai buồn đọc nữa.
-    required = [ok for _, ok, _, optional in rows if not optional]
-    degraded = [label for label, ok, _, optional in rows if not ok and optional]
-    if degraded:
+    # Mục tuỳ chọn hỏng KHÔNG phải lỗi môi trường: pipeline vẫn chạy đủ, chỉ mất
+    # phần tăng cường. Tính chúng vào điều kiện thoát là báo động giả.
+    if missing := health.degraded(checks):
         console.print(
             "[yellow]Chạy được, nhưng thiếu phần tăng cường:[/] "
-            + ", ".join(degraded)
+            + ", ".join(missing)
             + "\n[dim]Đăng nhập bằng `vsf login` để bật lại.[/]"
         )
-    if not all(required):
+    if not health.healthy(checks):
         raise typer.Exit(1)
+
+
+# -- Chế độ lô ---------------------------------------------------------------
+
+
+def _resolve_batch(batch: int | None, out: str | None) -> int:
+    """Xác định lô cần thao tác từ `--batch` hoặc `--out`, báo lỗi rõ nếu mơ hồ."""
+    from .batch import store
+
+    store.init()
+    if batch is not None:
+        if store.get_batch(batch) is None:
+            console.print(f"[red]Không có lô id={batch}. Xem `vsf batch status`.[/]")
+            raise typer.Exit(2)
+        return batch
+    if out:
+        return store.get_or_create_batch(out, out)
+
+    batches = store.list_batches()
+    if not batches:
+        console.print("[red]Chưa có lô nào. Tạo bằng `vsf batch add <file>`.[/]")
+        raise typer.Exit(2)
+    if len(batches) > 1:
+        console.print(
+            "[red]Có nhiều lô — chỉ rõ bằng --batch <id> hoặc --out <thư mục>.[/]\n"
+            "[dim]Xem danh sách: vsf batch status[/]"
+        )
+        raise typer.Exit(2)
+    return int(batches[0]["id"])
+
+
+@batch_app.command("add")
+def batch_add(
+    source: str = typer.Argument(..., help="File danh sách POI (.csv/.tsv/.txt)"),
+    out: str = typer.Option(..., "--out", help="Thư mục kết quả của đợt, vd output_19_8"),
+    name: str = typer.Option("", "--name", help="Tên đợt hiển thị trong giao diện"),
+) -> None:
+    """Nạp danh sách POI vào hàng đợi của một đợt."""
+    from .batch import ingest, store
+
+    path = Path(source)
+    if not path.is_file():
+        console.print(f"[red]Không thấy file {source}[/]")
+        raise typer.Exit(2)
+
+    pois = ingest.parse_file(path)
+    if not pois:
+        console.print("[red]Không đọc được POI nào từ file.[/]")
+        raise typer.Exit(1)
+
+    store.init()
+    batch_id = store.get_or_create_batch(out, name or out)
+    for poi in pois:
+        store.upsert_job(
+            batch_id,
+            poi.name,
+            seq=poi.seq,
+            address_hint=poi.address,
+            place_id=poi.place_id,
+            force_food=poi.force_food,
+            only_step=poi.only_step,
+        )
+
+    console.print(
+        f"[green]Đã nạp {len(pois)} POI[/] vào lô [bold]#{batch_id}[/] ({out}).\n"
+        f"[dim]Chạy: vsf batch run --batch {batch_id}[/]"
+    )
+
+
+@batch_app.command("run")
+def batch_run(
+    batch: int = typer.Option(None, "--batch", help="Id lô (bỏ trống nếu chỉ có một lô)"),
+    out: str = typer.Option(None, "--out", help="Chọn lô theo thư mục kết quả"),
+    limit: int = typer.Option(None, "--limit", help="Chỉ chạy tối đa N POI rồi dừng"),
+    fresh: bool = typer.Option(
+        False, "--fresh", help="Chạy lại cả các bước đã ok (mặc định là bỏ qua)"
+    ),
+) -> None:
+    """Chạy hết các POI đang chờ trong lô, tuần tự trên một phiên Chrome."""
+    from .batch import store, worker
+
+    batch_id = _resolve_batch(batch, out)
+    # Huỷ/tạm dừng của lần trước còn treo thì `run` phải gỡ, nếu không worker
+    # thấy cờ dừng ngay vòng lặp đầu tiên rồi thoát trong im lặng.
+    if store.batch_status(batch_id) in ("paused", "cancelled"):
+        store.set_batch_status(batch_id, "idle")
+
+    tally = worker.run_batch(batch_id, resume=not fresh, limit=limit)
+    if not tally:
+        console.print("[yellow]Không có POI nào đang chờ.[/]")
+        return
+
+    console.print("\n[bold]Kết cục:[/] " + "  ".join(f"{k}={v}" for k, v in sorted(tally.items())))
+    if tally.get("failed") or tally.get("needs_review"):
+        raise typer.Exit(1)
+
+
+@batch_app.command("status")
+def batch_status(
+    batch: int = typer.Option(None, "--batch", help="Id lô; bỏ trống để xem tất cả"),
+    flag: str = typer.Option(None, "--flag", help="Chỉ hiện POI mang cờ này"),
+    status: str = typer.Option(None, "--status", help="Lọc theo trạng thái job"),
+) -> None:
+    """Xem tiến độ các lô, hoặc chi tiết job của một lô."""
+    from .batch import store
+    from .errors import flag_label
+
+    store.init()
+    if batch is None and not flag and not status:
+        batches = store.list_batches()
+        if not batches:
+            console.print("[dim]Chưa có lô nào. `vsf batch reindex` để nạp dữ liệu đã có.[/]")
+            return
+        table = Table(title="Các đợt gán nhãn")
+        table.add_column("#")
+        table.add_column("Tên")
+        table.add_column("Thư mục")
+        table.add_column("Tổng", justify="right")
+        table.add_column("Chi tiết")
+        for b in batches:
+            detail = "  ".join(f"{k}={v}" for k, v in sorted(b["counts"].items()))
+            table.add_row(str(b["id"]), b["name"], b["out_dir"], str(b["total"]), detail)
+        console.print(table)
+        return
+
+    jobs = store.list_jobs(batch, status=status, flag=flag)
+    if not jobs:
+        console.print("[dim]Không có job nào khớp.[/]")
+        return
+
+    table = Table(title=f"Job ({len(jobs)})")
+    table.add_column("#", justify="right")
+    table.add_column("STT", justify="right")
+    table.add_column("POI", max_width=38)
+    table.add_column("Trạng thái")
+    table.add_column("Cờ", max_width=46)
+    marks = {
+        "done": "[green]done[/]",
+        "failed": "[red]failed[/]",
+        "needs_review": "[yellow]needs_review[/]",
+        "running": "[cyan]running[/]",
+    }
+    for j in jobs:
+        labels = ", ".join(flag_label(f) for f in j["flags"])
+        table.add_row(
+            str(j["id"]),
+            str(j["seq"]),
+            escape(j["poi_name"]),
+            marks.get(j["status"], f"[dim]{j['status']}[/]"),
+            escape(labels),
+        )
+    console.print(table)
+
+
+@batch_app.command("retry")
+def batch_retry(
+    batch: int = typer.Option(None, "--batch", help="Id lô"),
+    out: str = typer.Option(None, "--out", help="Chọn lô theo thư mục kết quả"),
+    everything: bool = typer.Option(
+        False,
+        "--all",
+        help="Đưa lại cả job đã done/needs_review vào hàng đợi, không chỉ job failed",
+    ),
+) -> None:
+    """Đưa các job hỏng về hàng đợi để chạy lại."""
+    from .batch import store
+
+    batch_id = _resolve_batch(batch, out)
+    n = store.reset_jobs(batch_id, only_failed=not everything)
+    console.print(f"[green]Đã đưa {n} job về hàng đợi.[/]")
+
+
+@batch_app.command("export")
+def batch_export(
+    batch: int = typer.Option(None, "--batch", help="Id lô"),
+    out: str = typer.Option(None, "--out", help="Chọn lô theo thư mục kết quả"),
+    target: str = typer.Option(None, "-o", "--output", help="Đường dẫn file tổng hợp"),
+) -> None:
+    """Gộp row.tsv của cả đợt thành một file TSV duy nhất."""
+    from .batch import export as batch_exporter
+    from .batch import store
+    from .schema import COLUMNS
+
+    batch_id = _resolve_batch(batch, out)
+    info = store.get_batch(batch_id)
+    assert info is not None
+    try:
+        result = batch_exporter.merge(info["out_dir"], target)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1)
+
+    if not result.rows:
+        console.print("[red]Không gom được dòng nào.[/]")
+        raise typer.Exit(1)
+
+    console.print(f"Đã ghi [bold]{result.path}[/] ({len(result.rows)} dòng, {len(COLUMNS)} cột)")
+    console.print(
+        f"  có raw_url: {result.with_url} | để trống: {len(result.rows) - result.with_url}"
+    )
+    for note in result.skipped:
+        console.print(f"  [dim][bỏ qua] {escape(note)}[/]")
+
+
+@batch_app.command("reindex")
+def batch_reindex(
+    dirs: list[str] = typer.Argument(None, help="Thư mục đợt; bỏ trống = quét mọi output*"),
+) -> None:
+    """Dựng lại hàng đợi từ các data.json có sẵn trên đĩa.
+
+    An toàn để chạy bất cứ lúc nào: đĩa là nguồn sự thật, DB chỉ là chỉ mục.
+    """
+    from .batch import reindex
+
+    results = [reindex.reindex_dir(d) for d in dirs] if dirs else reindex.reindex_all()
+    table = Table(title="Đã nạp lại chỉ mục")
+    table.add_column("#")
+    table.add_column("Thư mục")
+    table.add_column("POI", justify="right")
+    table.add_column("Chi tiết")
+    for r in results:
+        detail = "  ".join(f"{k}={v}" for k, v in sorted(r["counts"].items()))
+        table.add_row(str(r["batch_id"]), r["out_dir"], str(r["total"]), detail)
+    console.print(table)
+    console.print(f"[green]Tổng: {sum(r['total'] for r in results)} POI[/]")
+
+
+@app.command()
+def ui(
+    port: int = typer.Option(8000, "--port", help="Cổng HTTP"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Địa chỉ lắng nghe"),
+    reload: bool = typer.Option(False, "--reload", help="Tự nạp lại khi sửa code (khi phát triển)"),
+) -> None:
+    """Mở giao diện quản lý trên trình duyệt."""
+    try:
+        from .server.app import serve
+    except ModuleNotFoundError as exc:
+        console.print(
+            f"[red]Thiếu thư viện cho giao diện ({exc.name}).[/]\n"
+            '[dim]Cài bằng: uv pip install -e ".[ui]"[/]'
+        )
+        raise typer.Exit(2) from None
+
+    console.print(f"[green]Giao diện:[/] http://{host}:{port}  [dim](Ctrl+C để dừng)[/]")
+    serve(host=host, port=port, reload=reload)
 
 
 if __name__ == "__main__":

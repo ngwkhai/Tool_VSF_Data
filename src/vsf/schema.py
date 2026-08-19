@@ -35,6 +35,14 @@ COLUMNS = [
     "dest", "raw_url", "raw_cover_image_url", "raw_gallery_urls",
 ]
 
+# Tra cứu O(1) cho apply_overrides — chặn khoá lạ trước khi nó đẻ ra cột thứ 74.
+_COLUMN_SET = frozenset(COLUMNS)
+
+# Số URL trong cột raw_gallery_urls. Đây là quy ước của DATASET (đúng 3 ảnh phụ),
+# không phải tham số cào — nên nó nằm ở tầng xuất chứ không ở [gmaps] settings,
+# và giao diện tick chọn ảnh cũng chặn đúng con số này.
+GALLERY_URLS_COUNT = 3
+
 # Tỉnh/thành -> vùng. Chỉ cần cho các tỉnh đang gán nhãn; thiếu thì để trống
 # chứ không đoán bừa.
 REGION_BY_CITY = {
@@ -583,6 +591,24 @@ def pick_video(record: POIRecord, tiktok_index: int = 0) -> dict[str, Any]:
     return {}
 
 
+def apply_overrides(row: dict[str, str], record: POIRecord) -> dict[str, str]:
+    """Áp phần sửa tay lên dòng vừa dựng. Gọi CUỐI CÙNG, ngay trước khi trả về.
+
+    Đây là điều kiện để người gán nhãn dám sửa tay: sửa xong chạy lại `--only maps`
+    (vá ảnh thực đơn chẳng hạn) KHÔNG được xoá mất chỗ vừa sửa. Vì `overrides` nằm
+    trong data.json chứ không nằm trong row.tsv, xuất lại bao nhiêu lần cũng ra
+    cùng kết quả.
+
+    Chỉ nhận khoá thuộc COLUMNS — khoá lạ (đổi tên cột, gõ sai) bị bỏ qua chứ
+    không lặng lẽ đẻ thêm cột thứ 74 làm lệch cả file TSV.
+    """
+    overrides = getattr(record, "overrides", None) or {}
+    for col, value in overrides.items():
+        if col in _COLUMN_SET:
+            row[col] = "" if value is None else str(value)
+    return row
+
+
 def build_row(
     record: POIRecord,
     defaults: dict[str, Any],
@@ -602,7 +628,9 @@ def build_row(
         stub = {col: "" for col in COLUMNS}
         stub["category_l1"] = l1
         stub["name"] = maps_raw.get("name") or record.poi_name
-        return stub
+        # Áp override cả ở đây: người rà lại có thể muốn sửa ngay trên dòng stub
+        # (vd đổi `category_l1` sau khi xác nhận Google xếp ngành nhầm).
+        return apply_overrides(stub, record)
 
     # Suy các trường Gemini không cho. Làm ở đây (không phải lúc chạy bước
     # gemini1) vì must_try_dishes cần thực đơn — chỉ có sau khi bước `menu` xong.
@@ -647,14 +675,21 @@ def build_row(
     def _photo_base(url: str) -> str:
         return url.split("=")[0]
 
+    # Nguồn ảnh gallery mặc định là bể ứng viên thật lấy từ mục "Tất cả"; chỉ lùi
+    # về `secondary` cho data.json CŨ chưa có bể đó. `secondary` (img.DaSXdd)
+    # thực chất là ảnh bìa của từng MỤC ảnh chứ không phải ảnh phụ của quán, nên
+    # nó chỉ là phương án chót. Người gán nhãn tick 3 ảnh ở tab "Ảnh" thì lựa
+    # chọn đó nằm trong `overrides` và được áp CUỐI CÙNG, đè lên mặc định này.
+    candidates = (maps.get("gallery_candidates") or {}).get("images") or []
     seen_bases = {_photo_base(hero)} if hero else set()
     gallery: list[str] = []
-    for url in photos.get("secondary") or []:
+    for url in candidates or (photos.get("secondary") or []):
         base = _photo_base(url)
         if base in seen_bases:
             continue
         seen_bases.add(base)
         gallery.append(url)
+    gallery = gallery[:GALLERY_URLS_COUNT]
 
     row = {
         "poi_id": "",
@@ -750,4 +785,4 @@ def build_row(
         "raw_cover_image_url": hero,
         "raw_gallery_urls": ", ".join(gallery),
     }
-    return {col: row.get(col, "") for col in COLUMNS}
+    return apply_overrides({col: row.get(col, "") for col in COLUMNS}, record)

@@ -214,5 +214,8 @@ class Session:
         page = self.page(slot)
         if force or not page.url.startswith(url.split("?")[0]):
             page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-        page.bring_to_front()
+        # Chạy lô hàng chục POI thì mỗi lần đổi slot lại giật cửa sổ lên trước —
+        # suốt nhiều giờ. Tắt được qua [browser] bring_to_front.
+        if settings()["browser"].get("bring_to_front", True):
+            page.bring_to_front()
         return page
