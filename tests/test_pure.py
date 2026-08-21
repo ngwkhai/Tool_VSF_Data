@@ -215,7 +215,7 @@ def test_menu_category_preference_excludes_generic_food_photos():
     assert MENU_CATEGORY_PREFERENCE[0] == "Thực đơn"
 
 
-# -- Cổng chặn POI không phải đồ ăn ----------------------------------------
+# -- Cổng chặn POI sai nhóm ngành (profile food) ----------------------------
 
 
 def _record(name="X"):
@@ -225,20 +225,20 @@ def _record(name="X"):
 
 
 def test_reject_non_food_stops_on_a_hotel_label():
-    from vsf.pipeline import _reject_non_food
+    from vsf.pipeline import _reject_wrong_category
 
     record = _record()
-    stop = _reject_non_food(record, {"category_raw": "Khách sạn", "name": "Mường Thanh"})
+    stop = _reject_wrong_category(record, {"category_raw": "Khách sạn", "name": "Mường Thanh"})
     assert stop is True
     assert record.category_l1 == "OTHER"
-    assert any("KHÔNG PHẢI FOOD" in w for w in record.all_warnings())
+    assert any("SAI NHÓM NGÀNH" in w for w in record.all_warnings())
 
 
 def test_reject_non_food_lets_a_restaurant_through_and_seeds_l2():
-    from vsf.pipeline import _reject_non_food
+    from vsf.pipeline import _reject_wrong_category
 
     record = _record()
-    stop = _reject_non_food(record, {"category_raw": "Quán cà phê", "name": "Cà Phê Nhiên"})
+    stop = _reject_wrong_category(record, {"category_raw": "Quán cà phê", "name": "Cà Phê Nhiên"})
     assert stop is False
     assert record.category_l1 == "FOOD"
     # Nhãn Google đã đủ để chốt l2 trước cả khi hỏi Gemini.
@@ -247,20 +247,20 @@ def test_reject_non_food_lets_a_restaurant_through_and_seeds_l2():
 
 def test_reject_non_food_fails_open_and_warns_when_label_unreadable():
     """Selector hỏng -> vẫn chạy tiếp như luồng cũ, nhưng phải kêu lên."""
-    from vsf.pipeline import _reject_non_food
+    from vsf.pipeline import _reject_wrong_category
 
     record = _record()
-    assert _reject_non_food(record, {"name": "Bánh Canh Trần Văn Ơn"}) is False
+    assert _reject_wrong_category(record, {"name": "Bánh Canh Trần Văn Ơn"}) is False
     assert record.category_l1 == "FOOD"
     assert any("place_category" in w for w in record.all_warnings())
 
 
 def test_force_food_overrides_a_non_food_label():
-    from vsf.pipeline import _reject_non_food
+    from vsf.pipeline import _reject_wrong_category
 
     record = _record()
     record.force_food = True
-    assert _reject_non_food(record, {"category_raw": "Khách sạn", "name": "Y"}) is False
+    assert _reject_wrong_category(record, {"category_raw": "Khách sạn", "name": "Y"}) is False
     assert record.category_l1 == "FOOD"
 
 
@@ -670,3 +670,37 @@ def test_facebook_page_ref_handles_both_id_and_vanity_slug():
     assert page_ref("") == ""
     # /reel/ và /watch không phải định danh Trang.
     assert page_ref("/reel/123456789") == ""
+
+
+# -- URL mở bằng place_id ---------------------------------------------------
+
+
+def test_place_id_url_carries_no_coordinates_yet():
+    """URL mở bằng place_id CHƯA có toạ độ — Google viết lại sau khi tải xong.
+
+    Đây là lý do `open_place` không được chờ theo hình dạng chuỗi "/maps/place/":
+    URL này đã chứa sẵn chuỗi đó nên vòng chờ thoả NGAY, ta đọc URL trước khi
+    chuyển hướng, và lat/long/place_id đều rỗng dù mọi trường đọc từ DOM vẫn đủ.
+    """
+    from vsf.sites.gmaps import location_from_url, place_id_url
+
+    url = place_id_url("ChIJa0CWkGRncDERwAV1cLQNz_Q")
+    assert "/maps/place/" in url
+    got = location_from_url(url)
+    assert got.get("lat") is None
+    assert not got.get("place_id")
+
+
+def test_canonical_place_url_yields_all_three_fields():
+    """Sau khi Google viết lại URL thì lấy đủ cả ba trường."""
+    from vsf.sites.gmaps import location_from_url
+
+    url = (
+        "https://www.google.com/maps/place/Hotel/@12.2335123,109.1947456,17z/"
+        "data=!4m6!3m5!1s0x317067649096406b:0xf4cf0db4707505c0!8m2!3d12.2335123!"
+        "4d109.1947456!16s%2Fg%2F11c1z!19sChIJa0CWkGRncDERwAV1cLQNz_Q"
+    )
+    got = location_from_url(url)
+    assert got["lat"] == 12.2335
+    assert got["long"] == 109.1947
+    assert got["place_id"] == "ChIJa0CWkGRncDERwAV1cLQNz_Q"

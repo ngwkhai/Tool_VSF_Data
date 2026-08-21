@@ -17,8 +17,7 @@ except RuntimeError as exc:  # starlette báo thiếu httpx bằng RuntimeError,
     pytest.skip(f"TestClient không dùng được: {exc}", allow_module_level=True)
 
 from vsf.batch import reindex, store  # noqa: E402
-from vsf.pipeline import STEPS  # noqa: E402
-from vsf.schema import COLUMNS  # noqa: E402
+from vsf.profiles.food import COLUMNS, STEPS  # noqa: E402
 
 
 @pytest.fixture
@@ -189,9 +188,14 @@ def test_rerun_rejects_an_unknown_step(client):
 def test_stats_reports_per_step_and_flags(client):
     stats = client.get("/api/stats").json()
     assert stats["total"] == 1
-    assert set(stats["steps"]) == set(STEPS)
+    # /stats gom mọi bước của MỌI profile (có cả `rooms` của lưu trú) — một
+    # bảng thống kê theo bước chỉ hữu ích khi nó phủ hết bước đang tồn tại.
+    assert set(stats["steps"]) >= set(STEPS)
+    assert "rooms" in stats["steps"]
     assert any(f["code"] == "old_address_guessed" for f in stats["flags"])
-    assert len(stats["blank_by_column"]) == 73
+    # Chỉ profile đang có lô mới được liệt kê; lô mẫu ở đây là food.
+    assert {c["profile"] for c in stats["blank_by_column"]} == {"food"}
+    assert len(stats["blank_by_column"]) == len(COLUMNS)
 
 
 def test_creating_a_batch_from_pasted_text(client):
@@ -249,6 +253,7 @@ def test_pasted_table_is_parsed_into_name_address_place_id(client):
     res = client.post("/api/batches", json={"out_dir": "output_dan", "name": "", "text": text})
     assert res.json() | {"batch_id": 0} == {
         "batch_id": 0, "added": 2, "with_place_id": 2, "with_address": 2,
+        "profile": "food",
     }
 
     jobs = client.get(f"/api/batches/{res.json()['batch_id']}/jobs").json()["jobs"]

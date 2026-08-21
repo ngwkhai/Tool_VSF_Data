@@ -49,6 +49,10 @@ class WrongPlaceError(VsfError):
 # Đặt cạnh mỗi `record.warn(...)` đáng để lọc. Không phải cảnh báo nào cũng có
 # cờ: chỉ những thứ mà người gán nhãn thực sự cần một hàng đợi riêng để xử lý.
 
+# "POI không thuộc nhóm ngành của profile". Mã chuỗi GIỮ NGUYÊN `not_food` dù
+# giờ dùng cho cả profile lưu trú: nó đã nằm trong `flags` của data.json và
+# `flags_json` của SQLite cho 141 POI cũ, đổi mã là hàng đợi triage mất sạch
+# lịch sử. Chỉ nhãn hiển thị được đổi cho trung tính.
 FLAG_NOT_FOOD = "not_food"
 FLAG_TIKTOK_LOW = "tiktok_below_threshold"
 FLAG_TIKTOK_NONE = "tiktok_not_found"
@@ -69,7 +73,7 @@ FLAG_FACEBOOK_UNAVAILABLE = "facebook_unavailable"
 # nhưng có ô trống hoặc giá trị đáng ngờ.
 FLAG_LABELS: dict[str, tuple[str, str]] = {
     WrongPlaceError.code: ("Có thể lấy nhầm quán", "block"),
-    FLAG_NOT_FOOD: ("Không phải FOOD", "block"),
+    FLAG_NOT_FOOD: ("Sai nhóm ngành", "block"),
     FLAG_TIKTOK_LOW: ("TikTok dưới ngưỡng tin cậy", "warn"),
     FLAG_TIKTOK_NONE: ("Không tìm được video TikTok", "warn"),
     FLAG_NO_MENU_PHOTOS: ("Không có ảnh thực đơn", "warn"),
@@ -121,7 +125,11 @@ _WARNING_PATTERNS: tuple[tuple[str, str], ...] = (
     ("không lấy được ảnh đại diện", FLAG_NO_COVER_PHOTO),
     ("raw_url sẽ để trống", FLAG_TIKTOK_LOW),
     ("không tìm được video nào", FLAG_TIKTOK_NONE),
+    # Câu cũ ("KHÔNG PHẢI FOOD") của 141 POI đã chạy trước khi có profile lưu
+    # trú, và câu mới trung tính. Giữ CẢ HAI: bản ghi cũ trên đĩa không được
+    # viết lại, nên bỏ needle cũ là hàng đợi triage mất đúng nhóm block.
     ("không phải food", FLAG_NOT_FOOD),
+    ("sai nhóm ngành", FLAG_NOT_FOOD),
     ("có thể lấy nhầm quán", WrongPlaceError.code),
     ("không đọc được nhãn ngành", FLAG_CATEGORY_UNKNOWN),
     ("không trang nào khớp địa chỉ", FLAG_FACEBOOK_UNVERIFIED),

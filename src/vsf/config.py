@@ -1,4 +1,4 @@
-"""Nạp config/settings.toml và config/selectors.toml."""
+"""Nạp config/settings.toml, config/profile_*.toml và config/selectors.toml."""
 
 from __future__ import annotations
 
@@ -21,6 +21,29 @@ def _load(name: str) -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def settings() -> dict[str, Any]:
     return _load("settings.toml")
+
+
+@lru_cache(maxsize=8)
+def profile_settings(name: str) -> dict[str, Any]:
+    """settings.toml gộp với config/profile_<name>.toml — file profile THẮNG.
+
+    Gộp NÔNG, theo từng section: `[gemini]` của profile chỉ ghi đè những khoá nó
+    khai (các prompt), còn `profile_chat_url`/`response_timeout` ở settings.toml
+    vẫn giữ nguyên. Gộp sâu hơn sẽ khiến `[category].markers` của hai profile
+    trộn vào nhau — mà một bên là danh sách trắng, một bên là danh sách đen, hợp
+    nhất lại thì cổng chặn vô nghĩa.
+
+    Section chỉ có ở profile (`[dataset]`, `[category]`) được thêm nguyên khối.
+    """
+    merged: dict[str, Any] = {}
+    for section, value in settings().items():
+        merged[section] = dict(value) if isinstance(value, dict) else value
+    for section, value in _load(f"profile_{name}.toml").items():
+        if isinstance(value, dict) and isinstance(merged.get(section), dict):
+            merged[section] = {**merged[section], **value}
+        else:
+            merged[section] = value
+    return merged
 
 
 @lru_cache(maxsize=1)

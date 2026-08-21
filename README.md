@@ -3,7 +3,8 @@
 Tool gán nhãn & tăng cường dữ liệu POI (quán ăn, quán cà phê…) ở Nha Trang.
 
 Bạn đưa vào **tên một quán**. Tool tự mở Chrome, chạy qua 6 bước (Google Maps →
-Gemini → TikTok → Facebook), rồi ghi ra một dòng dữ liệu đúng 73 cột của dataset:
+Gemini → TikTok → Facebook), rồi ghi ra một dòng dữ liệu đúng bộ cột của dataset
+(**73 cột** cho POI đồ ăn, **72 cột** cho POI lưu trú — xem `--profile` bên dưới):
 
 ```bash
 .venv/bin/vsf run "Bánh Canh Trần Văn Ơn"
@@ -11,7 +12,7 @@ Gemini → TikTok → Facebook), rồi ghi ra một dòng dữ liệu đúng 73 
 
 ```
 output/banh-canh-tran-van-on/
-├── row.tsv      ← kết quả chính, 73 cột, dán thẳng vào dataset
+├── row.tsv      ← kết quả chính, dán thẳng vào dataset
 └── data.json    ← dữ liệu thô từng bước, để chạy tiếp và tra lại khi nghi ngờ
 ```
 
@@ -78,15 +79,24 @@ https://gemini.google.com/app/bac782da2aaa6656
                               └── phần này là ID thread
 ```
 
-### Bước 4 · Sửa `config/settings.toml`
+### Bước 4 · Sửa config
 
-Mở file, sửa **3 chỗ**:
+Config nằm ở **3 file**: `settings.toml` (dùng chung) và hai file profile
+(`profile_food.toml`, `profile_accom.toml`) chứa prompt + giá trị cố định của
+từng bộ dataset.
+
+Trong `config/settings.toml`:
 
 ```toml
 [gemini]
 profile_chat_url = "https://gemini.google.com/app/<ID-thread-1-cua-ban>?hl=vi"
 menu_chat_url    = "https://gemini.google.com/app/<ID-thread-2-cua-ban>?hl=vi"
+```
 
+Rồi trong **cả hai** file `config/profile_food.toml` và
+`config/profile_accom.toml`:
+
+```toml
 [dataset]
 labeled_by = "<tên bạn>"
 ```
@@ -128,7 +138,7 @@ Trong giao diện:
 1. **Đợt gán nhãn** → dán danh sách quán vào ô, đặt tên thư mục kết quả → *Nạp*.
 2. Bấm **Chạy**. Tiến độ hiện ngay tại chỗ, không phải nhìn terminal.
 3. **Cần xử lý** → xem POI nào có vấn đề và vì sao.
-4. Bấm vào một POI → xem 6 bước, sửa tay 73 cột, chọn ảnh, đổi link TikTok.
+4. Bấm vào một POI → xem 6 bước, sửa tay từng cột, chọn ảnh, đổi link TikTok.
 
 Danh sách dán vào ô có thể là **3 cột copy thẳng từ bảng tính**:
 
@@ -156,6 +166,10 @@ hoặc chỉ mỗi tên, mỗi dòng một quán.
 # Chạy lại đúng một bước
 .venv/bin/vsf run "Cà Phê Nhiên" --only maps
 #   6 bước: maps | gemini1 | old_address | menu | tiktok | facebook
+
+# POI lưu trú (khách sạn / resort / homestay): bộ 72 cột, bước `rooms` thay `menu`
+.venv/bin/vsf run "Lucky Sun Hotel Nha Trang Beach" --profile accom
+#   6 bước: maps | gemini1 | old_address | rooms | tiktok | facebook
 
 # Xuất lại row.tsv từ data.json đã có (không mở Chrome)
 .venv/bin/vsf export "Cà Phê Nhiên"
@@ -197,7 +211,7 @@ Chạy cả một danh sách:
 | `Không tìm thấy Chrome tại /Applications/...` | Chưa cài Chrome, hoặc không phải máy macOS. Sửa `CHROME_BIN` ở `src/vsf/browser.py:25` |
 | `Chưa đăng nhập Google trong profile của tool` | Chạy `vsf login` rồi đăng nhập lại trong đúng cửa sổ đó |
 | `CÓ THỂ LẤY NHẦM QUÁN: hỏi 'X' nhưng Google trả về 'Y'` | Đúng như báo. Chạy lại kèm `--address "<số nhà + tên đường>"`, hoặc tra `place_id` rồi đưa vào |
-| `KHÔNG PHẢI FOOD: ... -> category_l1=OTHER` | Tool cho rằng đây không phải quán ăn. Đúng thì bỏ POI này; sai (vd quán ăn trong khách sạn) thì chạy lại với `--force-food` |
+| `SAI NHÓM NGÀNH: ... -> category_l1=OTHER` | Tool cho rằng POI không thuộc nhóm ngành của profile. Kiểm tra trước xem có quên `--profile accom` cho một khách sạn không. Đúng là sai nhóm thì bỏ POI; nhãn Google gây hiểu nhầm (vd quán ăn trong khách sạn) thì chạy lại với `--force-category` |
 | `Timeout waiting for selector` / một trường bỗng rỗng | Google hoặc TikTok đổi giao diện. Selector nằm hết ở `config/selectors.toml` — sửa file đó, **đừng sửa code**. Dò lại bằng `.venv/bin/python scripts/recon.py gmaps "<tên POI>"` |
 | `Bỏ qua bước thực đơn: không có ảnh thực đơn nào` | Quán không có mục "Thực đơn" trên Google Maps. Bình thường, cột `menu` để trống |
 | `chỉ tìm được 2/5 bài tiêu cực` | Quán ít bài chê. Bình thường, không phải lỗi |
@@ -207,7 +221,7 @@ Chạy cả một danh sách:
 Kiểm tra code còn lành:
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # 282 test, không cần browser
+.venv/bin/python -m pytest tests/ -q      # 327 test, không cần browser
 ```
 
 ---
@@ -216,14 +230,16 @@ Kiểm tra code còn lành:
 
 | File | Nội dung |
 |---|---|
-| `config/settings.toml` | Toàn bộ prompt, ngưỡng, bảng phân loại, URL thread Gemini |
+| `config/settings.toml` | Ngưỡng và tham số dùng chung, URL thread Gemini |
+| `config/profile_food.toml` | Prompt + bảng phân loại + giá trị cố định của dataset POI đồ ăn (73 cột) |
+| `config/profile_accom.toml` | Như trên, cho dataset POI lưu trú (72 cột) |
 | `config/selectors.toml` | Toàn bộ CSS selector của Google Maps / Gemini / TikTok / Facebook |
-| `CLAUDE.md` | Ghi chú kỹ thuật, quy ước 73 cột, và danh sách cạm bẫy đã vấp |
+| `CLAUDE.md` | Ghi chú kỹ thuật, quy ước từng cột, và danh sách cạm bẫy đã vấp |
 
 **Hai quy tắc quan trọng nhất khi sửa tool:**
 
 1. Selector đổi thì sửa `config/selectors.toml`, đừng viết thẳng vào code.
-2. Prompt đổi thì sửa `config/settings.toml`. Comment ngay phía trên mỗi prompt
+2. Prompt đổi thì sửa `config/profile_<tên>.toml`. Comment ngay phía trên mỗi prompt
    ghi rõ **cách viết nào đã thất bại và vì sao** — đọc trước khi sửa để khỏi
    lặp lại.
 

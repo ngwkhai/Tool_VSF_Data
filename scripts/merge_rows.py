@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from vsf.batch.export import merge  # noqa: E402
-from vsf.schema import COLUMNS  # noqa: E402
+from vsf.profiles import get_profile  # noqa: E402
 
 
 def main() -> int:
@@ -30,7 +30,7 @@ def main() -> int:
 
     try:
         result = merge(args.out_dir, args.output)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         print(exc)
         return 1
 
@@ -38,7 +38,11 @@ def main() -> int:
         print("Không gom được dòng nào.")
         return 1
 
-    print(f"Đã ghi {result.path}  ({len(result.rows)} dòng, {len(COLUMNS)} cột)")
+    n_cols = len(get_profile(result.profile).COLUMNS)
+    print(
+        f"Đã ghi {result.path}  "
+        f"({len(result.rows)} dòng, {n_cols} cột, profile {result.profile})"
+    )
     print(f"  có raw_url: {result.with_url} | để trống: {len(result.rows) - result.with_url}")
     for note in result.skipped:
         print(f"  [bỏ qua] {note}")

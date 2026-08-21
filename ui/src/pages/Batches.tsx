@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { useLoad } from "../hooks";
+import { useConfig, useLoad, useWorkerEvents } from "../hooks";
 import { Button, Empty, ErrorNote, LinkButton, Loading, Panel } from "../components/ui";
 
 const FIELD =
@@ -14,6 +14,8 @@ function NewBatchForm({ onCreated }: { onCreated: () => void }) {
   const [outDir, setOutDir] = useState("");
   const [name, setName] = useState("");
   const [text, setText] = useState("");
+  const [profile, setProfile] = useState("");
+  const config = useConfig();
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -28,10 +30,15 @@ function NewBatchForm({ onCreated }: { onCreated: () => void }) {
     setError(null);
     setNote(null);
     try {
-      const res = await api.createBatch({ out_dir: outDir.trim(), name: name.trim(), text });
+      const res = await api.createBatch({
+        out_dir: outDir.trim(),
+        name: name.trim(),
+        text,
+        profile: profile || config?.default_profile || "food",
+      });
       // Báo lại đã nhận được bao nhiêu place_id/địa chỉ: đó là cách duy nhất để
       // biết ngay rằng cột đã được tách đúng, thay vì phát hiện lúc chạy xong.
-      const parts = [`Đã nạp ${res.added} POI vào đợt #${res.batch_id}`];
+      const parts = [`Đã nạp ${res.added} POI (${res.profile}) vào đợt #${res.batch_id}`];
       if (res.with_place_id) parts.push(`${res.with_place_id} có place_id`);
       if (res.with_address) parts.push(`${res.with_address} có địa chỉ`);
       setNote(parts.join(" · ") + ".");
@@ -66,6 +73,23 @@ function NewBatchForm({ onCreated }: { onCreated: () => void }) {
             placeholder="Đợt 19/8"
             className={FIELD}
           />
+        </label>
+        {/* Bộ dataset chốt CẢ ĐỢT: nó quyết định bộ cột của row.tsv, danh sách
+            bước, và chiều của cổng phân loại ngành. Đổi sau khi đã chạy nghĩa là
+            xuất lại toàn bộ, nên chọn ngay từ đây. */}
+        <label className="block">
+          <span className={LABEL}>Bộ dataset</span>
+          <select
+            value={profile || config?.default_profile || "food"}
+            onChange={(e) => setProfile(e.target.value)}
+            className={FIELD}
+          >
+            {Object.entries(config?.profiles ?? {}).map(([key, p]) => (
+              <option key={key} value={key}>
+                {key} — {p.columns.length} cột ({p.category_l1})
+              </option>
+            ))}
+          </select>
         </label>
       </div>
 
@@ -109,6 +133,24 @@ export function Batches() {
   const { data, error, loading, reload } = useLoad(() => api.batches());
   const [busy, setBusy] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [pausing, setPausing] = useState<number | null>(null);
+
+  // Trang này trước đây nạp ĐÚNG MỘT LẦN, không đăng ký luồng sự kiện. Hệ quả:
+  // bấm "Tạm dừng" xong, `reload()` chạy ngay lập tức trong khi worker còn đang
+  // giữa một POI (có thể vài phút) nên `running` vẫn là lô đó — và không có gì
+  // nạp lại nữa, kể cả sau khi worker đã dừng thật. Nhìn từ ngoài thì nút tạm
+  // dừng "không hoạt động". Bám theo sự kiện worker, y hệt trang chi tiết lô.
+  useWorkerEvents((e) => {
+    if (
+      e.kind === "job_end" ||
+      e.kind === "batch_end" ||
+      e.kind === "batch_stopped" ||
+      e.kind === "batch_error"
+    ) {
+      setPausing(null);
+      reload();
+    }
+  });
 
   async function act(id: number, fn: () => Promise<unknown>) {
     setBusy(id);
@@ -228,11 +270,17 @@ export function Batches() {
                       <div className="flex gap-2 justify-end flex-nowrap">
                         {running ? (
                           <Button
-                            onClick={() => act(b.id, () => api.pause(b.id))}
-                            disabled={busy === b.id}
+                            onClick={() => {
+                              // Dừng là cờ HỢP TÁC: worker đọc giữa hai POI.
+                              // Phải nói rõ ngay, nếu không người dùng tưởng
+                              // bấm hụt rồi bấm lại nhiều lần.
+                              setPausing(b.id);
+                              act(b.id, () => api.pause(b.id));
+                            }}
+                            disabled={busy === b.id || pausing === b.id}
                             title="Dừng sau khi POI đang chạy kết thúc"
                           >
-                            Tạm dừng
+                            {pausing === b.id ? "Đang dừng…" : "Tạm dừng"}
                           </Button>
                         ) : (
                           <Button

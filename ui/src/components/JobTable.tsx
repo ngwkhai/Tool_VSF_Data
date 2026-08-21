@@ -1,8 +1,19 @@
 import { Link } from "react-router-dom";
-import type { Job } from "../types";
+import { useConfig } from "../hooks";
+import type { AppConfig, Job } from "../types";
 import { FlagChip, StatusPill, StepRibbon } from "./ui";
 
-const STEPS = ["maps", "gemini1", "old_address", "menu", "tiktok", "facebook"];
+/* Thứ tự bước KHÁC NHAU giữa hai profile (`menu` với đồ ăn, `rooms` với lưu
+   trú) và bảng này trộn job của nhiều lô, nên phải tra theo từng job. Trước đây
+   danh sách 6 bước bị chép cứng ở đây: mọi job lưu trú hiện một ô `menu` không
+   bao giờ chạy và thiếu hẳn ô `rooms`.
+
+   Cấu hình chưa tải xong thì lùi về đúng các bước bản ghi đã có — thà thiếu ô
+   còn hơn hiện sai ô. */
+function stepOrder(config: AppConfig | null, job: Job): string[] {
+  const steps = config?.profiles[job.profile]?.steps;
+  return steps ?? Object.keys(job.steps);
+}
 
 export function JobTable({
   jobs,
@@ -14,6 +25,7 @@ export function JobTable({
   labels: Record<string, { label: string; severity: "block" | "warn" }>;
   showBatch?: boolean;
 }) {
+  const config = useConfig();
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-left">
@@ -22,7 +34,7 @@ export function JobTable({
             <th className="font-medium px-4 py-3 w-14 text-right">STT</th>
             <th className="font-medium px-4 py-3">POI</th>
             <th className="font-medium px-4 py-3 w-36">Trạng thái</th>
-            <th className="font-medium px-4 py-3 w-32" title={STEPS.join(" → ")}>
+            <th className="font-medium px-4 py-3 w-32" title="Tiến độ từng bước">
               6 bước
             </th>
             <th className="font-medium px-4 py-3">Cần chú ý</th>
@@ -68,7 +80,7 @@ export function JobTable({
                 <StatusPill status={job.status} />
               </td>
               <td className="px-4 py-3 pt-4">
-                <StepRibbon steps={job.steps} order={STEPS} />
+                <StepRibbon steps={job.steps} order={stepOrder(config, job)} />
               </td>
               <td className="px-4 py-3">
                 <div className="flex flex-wrap gap-1.5">

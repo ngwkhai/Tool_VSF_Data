@@ -45,7 +45,10 @@ CREATE TABLE IF NOT EXISTS batch (
     out_dir    TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL,
     status     TEXT NOT NULL DEFAULT 'idle',
-    note       TEXT NOT NULL DEFAULT ''
+    note       TEXT NOT NULL DEFAULT '',
+    -- Bộ dataset của cả đợt: 'food' (73 cột) hay 'accom' (72 cột). Mặc định
+    -- 'food' cho mọi đợt đã tạo trước khi profile lưu trú tồn tại.
+    profile    TEXT NOT NULL DEFAULT 'food'
 );
 
 CREATE TABLE IF NOT EXISTS job (
@@ -60,6 +63,9 @@ CREATE TABLE IF NOT EXISTS job (
     -- Google place_id người dùng cung cấp sẵn. Đây là cách neo MẠNH NHẤT: mở
     -- thẳng đúng địa điểm thay vì tìm theo tên rồi hi vọng Google trả đúng quán.
     place_id      TEXT NOT NULL DEFAULT '',
+    -- Profile của riêng job. Gần như luôn bằng profile của lô, nhưng khai riêng
+    -- được để nhét một khách sạn lẻ vào đợt đồ ăn mà không phải tách lô.
+    profile       TEXT NOT NULL DEFAULT 'food',
     force_food    INTEGER NOT NULL DEFAULT 0,
     only_step     TEXT,
     status        TEXT NOT NULL DEFAULT 'queued',
@@ -122,11 +128,18 @@ def connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 # ném "no such column" ngay lần ghi đầu tiên.
 _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("job", "place_id", "TEXT NOT NULL DEFAULT ''"),
+    ("batch", "profile", "TEXT NOT NULL DEFAULT 'food'"),
+    ("job", "profile", "TEXT NOT NULL DEFAULT 'food'"),
 )
 
 # Cột mang Ý ĐỊNH CỦA NGƯỜI DÙNG: giá trị rỗng không bao giờ được ghi đè giá trị
 # đã có. Xem giải thích ở `upsert_job`.
-_STICKY = frozenset({"address_hint", "place_id"})
+#
+# `profile` cũng sticky, nhưng vì lý do khác: nó có giá trị mặc định NON-RỖNG
+# ('food'). Người gọi không truyền (reindex khi data.json chưa kịp ghi) sẽ gửi
+# chuỗi rỗng, và không có chốt này thì rỗng ghi đè 'accom' -> cả đợt lưu trú âm
+# thầm quay về bộ 73 cột của đồ ăn ở lần export sau.
+_STICKY = frozenset({"address_hint", "place_id", "profile"})
 
 
 def init(db_path: Path | None = None) -> None:
@@ -142,17 +155,22 @@ def init(db_path: Path | None = None) -> None:
 
 
 def get_or_create_batch(
-    out_dir: str, name: str = "", db_path: Path | None = None
+    out_dir: str, name: str = "", db_path: Path | None = None, profile: str = "food"
 ) -> int:
-    """Trả về id của lô ứng với `out_dir`, tạo mới nếu chưa có."""
+    """Trả về id của lô ứng với `out_dir`, tạo mới nếu chưa có.
+
+    Lô đã tồn tại thì GIỮ NGUYÊN profile của nó — `batch add` lần hai vào cùng
+    thư mục là thêm POI vào đợt cũ, không phải đổi cả bộ cột của đợt đang chạy dở.
+    """
     out_dir = str(out_dir)
     with connect(db_path) as conn:
         row = conn.execute("SELECT id FROM batch WHERE out_dir = ?", (out_dir,)).fetchone()
         if row:
             return int(row["id"])
         cur = conn.execute(
-            "INSERT INTO batch (name, out_dir, created_at, status) VALUES (?,?,?,'idle')",
-            (name or out_dir, out_dir, now()),
+            "INSERT INTO batch (name, out_dir, created_at, status, profile) "
+            "VALUES (?,?,?,'idle',?)",
+            (name or out_dir, out_dir, now(), profile),
         )
         return int(cur.lastrowid)
 
@@ -181,6 +199,18 @@ def set_batch_status(batch_id: int, status: str, db_path: Path | None = None) ->
         raise ValueError(f"Trạng thái lô không hợp lệ: {status!r}")
     with connect(db_path) as conn:
         conn.execute("UPDATE batch SET status = ? WHERE id = ?", (status, batch_id))
+
+
+def set_batch_profile(batch_id: int, profile: str, db_path: Path | None = None) -> None:
+    """Chốt lại bộ dataset của một lô.
+
+    Chỉ `reindex` gọi hàm này: nó đọc `profile` thẳng từ data.json, tức là từ
+    NGUỒN SỰ THẬT, nên được phép sửa giá trị trong chỉ mục. `get_or_create_batch`
+    thì ngược lại — nó giữ nguyên profile của lô đã có, vì `batch add` lần hai là
+    thêm POI chứ không phải đổi bộ cột của đợt đang chạy dở.
+    """
+    with connect(db_path) as conn:
+        conn.execute("UPDATE batch SET profile = ? WHERE id = ?", (profile, batch_id))
 
 
 def delete_batch(batch_id: int, db_path: Path | None = None) -> int:
@@ -217,6 +247,7 @@ def upsert_job(
     place_id: str = "",
     force_food: bool = False,
     only_step: str | None = None,
+    profile: str = "",
     db_path: Path | None = None,
     **extra: Any,
 ) -> int:
@@ -230,6 +261,7 @@ def upsert_job(
         "seq": seq,
         "address_hint": address_hint,
         "place_id": place_id,
+        "profile": profile,
         "force_food": int(bool(force_food)),
         "only_step": only_step,
         "updated_at": now(),

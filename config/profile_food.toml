@@ -1,0 +1,219 @@
+# Profile FOOD — POI đồ ăn, 73 cột.
+#
+# File này chứa MỌI thứ phụ thuộc vào dataset: giá trị cố định của cột, bộ
+# phân loại ngành, và prompt Gemini. Phần dùng chung cho mọi profile (browser,
+# gmaps, tiktok, facebook, ward_map, URL + timeout của Gemini) nằm ở
+# config/settings.toml. Khoá trùng tên thì file này THẮNG.
+#
+# Tách file thay vì lồng [profiles.food.*] vào settings.toml là cố ý: mỗi file
+# giữ được bảng PHẲNG. Bảng con lọt nhầm vào bảng khác từng khiến
+# settings()["old_wards"] rỗng và vô hiệu cả khâu đối chiếu trong im lặng.
+
+# Giá trị cố định điền vào các cột không lấy được từ 3 nguồn.
+[dataset]
+# Chỉ còn là giá trị lùi cho data.json cũ chưa có khoá `category_l1`. POI chạy
+# mới lấy giá trị do bước `maps` phân loại (xem [category], schema.classify_l1).
+category_l1 = "FOOD"
+status = "active"
+review_status = "draft"
+booking_source = "internal"
+rating_source = "Google Maps"
+labeled_by = "Khải"
+# Mọi dòng xuất ra đều mang mức này, không dùng mức Gemini tự chấm. Người gán
+# nhãn rà lại rồi hạ xuống nếu cần.
+confidence_level = "Cao"
+info_expiry_note = "Giá và giờ mở cửa có thể thay đổi, cần kiểm tra lại định kỳ."
+
+[gemini]
+# One-shot: hỏi ĐỦ 26 trường + quy ước trong MỘT lượt, thay vì hỏi 17 trường rồi
+# tách 2 lượt riêng để bổ sung phần thiếu (đã gây ra tới 3 lượt/POI trước đây,
+# tốn thời gian và dễ khiến Gemini lặp lại/trôi khỏi định dạng giữa chừng).
+# {poi} = tên POI; {address_clause} = " (địa chỉ: ...)" nếu có địa chỉ mẫu, rỗng
+# nếu không — cùng lý do gmaps.search_query() ghép địa chỉ vào truy vấn Maps:
+# giúp Gemini không lấy nhầm quán trùng tên ở tỉnh/phố khác.
+profile_prompt = """Địa điểm cần tra: "{poi}"{address_clause} tại Nha Trang, Khánh Hòa (có thể có địa điểm trùng tên ở tỉnh/thành khác — chỉ lấy đúng địa điểm này).
+
+Đây là một BIỂU MẪU (template) {n_fields} dòng. Nhiệm vụ của bạn CHỈ là chép lại NGUYÊN VĂN {n_fields} dòng dưới đây rồi điền giá trị vào ngay sau dấu hai chấm của MỖI dòng. TUYỆT ĐỐI KHÔNG được đổi, dịch, viết lại, thêm hay bớt bất kỳ tên trường nào (phần TRƯỚC dấu hai chấm) — giữ nguyên y hệt ký tự cho ký tự, kể cả khi có vẻ nó "nên" được dịch sang tiếng Việt. Không viết thêm dòng nào khác ngoài {n_fields} dòng này (không mở đầu, không dẫn nhập, không trích dẫn nguồn, không markdown, không đánh số). Nếu không tra được thì suy luận hợp lý từ thông tin đã biết, đừng bỏ trống — CHỈ được để trống nếu quy ước bên dưới cho phép:
+
+name_en:
+category_l2:
+tags:
+cuisine_type:
+must_try_dishes:
+price_per_person_avg:
+seating_capacity:
+dietary_options:
+reservation_required:
+dress_code:
+alcohol_served:
+view_type:
+operating_note:
+description_short:
+description_long:
+best_time_to_visit:
+estimated_duration:
+suitable_for:
+not_suitable_for:
+insider_tips:
+weather_dependency:
+crowd_level_note:
+matched_intents:
+search_keywords:
+confidence_level:
+info_expiry_note:
+
+Quy ước:
+- name_en: CHỈ ghi khi quán thật sự có tên tiếng Anh chính thức. Không có thì ghi "không có" — tuyệt đối đừng bỏ dấu tên tiếng Việt rồi coi đó là tên tiếng Anh
+- category_l2: chọn ĐÚNG MỘT trong các nhãn sau, chép NGUYÊN VĂN kể cả dấu và chữ hoa/thường, không dịch, không viết tắt, không tự nghĩ nhãn mới: {l2_values}
+- must_try_dishes: 3-5 món đặc trưng, ngăn bởi dấu phẩy
+- seating_capacity: chỉ ghi con số chỗ ngồi ước lượng
+- reservation_required, alcohol_served: chỉ ghi có hoặc không
+- confidence_level: cao, trung bình hoặc thấp
+- info_expiry_note: ghi chú thông tin cần kiểm tra lại sau bao lâu"""
+# Prompt tự chứa toàn bộ ngữ cảnh — KHÔNG được dựa vào lịch sử chat như câu cũ
+# "trích xuất tương tự" (thread mới không có lượt nào trước đó để "tương tự
+# theo"). "gia" quy ước theo NGHÌN ĐỒNG để khớp với schema.menu_prices() —
+# hàm đó luôn nhân 1000, nên nếu Gemini trả giá đầy đủ VNĐ thì price_min/max sẽ
+# sai gấp 1000 lần.
+menu_prompt = """Extract every visible restaurant menu item into this exact JSON array format:
+[
+  {"loai_thuc_pham":"section or category","ten":"item name","gia":"numeric price string"}
+]
+Rules: use exactly the three keys above; repeat the section for every row; create separate rows for variants such as M and L and append the variant to ten; keep gia as a string, remove currency symbols and a trailing k/K without scaling; use an empty string when a price is unreadable; preserve Vietnamese diacritics; return only the JSON array with no Markdown or explanation.
+
+One more rule specific to this dataset: "gia" must be in units of NGHÌN ĐỒNG (thousands of VND) as a bare integer string — e.g. an item priced "129.000đ" or "129k" must have "gia": "129", not "129000". Do not multiply or add zeros."""
+
+# Gửi khi câu trả lời thực đơn trôi khỏi định dạng JSON (Gemini trả lời văn
+# xuôi thay vì mảng JSON). Không nêu lại menu — Gemini vẫn nhìn thấy câu trả lời
+# văn xuôi ngay phía trên, chỉ cần ép đúng khuôn.
+menu_reformat_prompt = """Hãy trình bày lại thực đơn vừa trích xuất ở trên dưới dạng một mảng JSON, mỗi món là một object với đúng ba khoá "loai_thuc_pham", "ten" và "gia". "gia" chỉ ghi số nguyên theo đơn vị nghìn đồng, KHÔNG dùng dấu phẩy ngăn nghìn (ví dụ 129000 đồng ghi là "129", không ghi "129,000"). Chỉ trả về mảng JSON, không kèm giải thích, không bọc trong khối markdown."""
+
+# Gửi khi câu trả lời đầu chưa đủ trường (thread cũ chỉ trả 18 trường, hoặc
+# Gemini trả lời văn xuôi). Phải yêu cầu BỔ SUNG chứ không chỉ "trình bày lại" —
+# các trường mới vốn không có trong câu trả lời trước.
+# {fields} / {missing} = biểu mẫu (mỗi dòng "ten_truong:") do pipeline.py dựng
+# sẵn — xem step_gemini1(). Truyền kèm dấu ":" chứ không chỉ tên trường trần,
+# vì "đây là biểu mẫu, chỉ điền vào chỗ trống" neo Gemini theo đúng tên trường
+# đáng tin cậy hơn hẳn "tạo dòng theo tên trường sau" (Gemini hay tự dịch tên
+# trường sang tiếng Việt nếu chỉ được đưa DANH SÁCH tên, không phải biểu mẫu).
+# Hai prompt cho hai tình huống khác nhau — đừng gộp làm một:
+#
+# 1. reformat_prompt: thread trôi khỏi schema, Gemini trả lời văn xuôi. Phải
+#    liệt kê LẠI CẢ BỘ trường để kéo nó về đúng định dạng.
+reformat_prompt = """Hãy trình bày lại thông tin trên theo đúng BIỂU MẪU dưới đây: chép lại NGUYÊN VĂN từng dòng rồi điền giá trị sau dấu hai chấm. TUYỆT ĐỐI KHÔNG đổi/dịch tên trường (phần trước dấu hai chấm) sang tiếng Việt (đã từng bị đổi `suitable_for:` thành `doi_tuong_phu_hop:` — không được lặp lại lỗi này). Không thêm tiêu đề, không đánh số, không trích dẫn nguồn:
+{fields}"""
+
+# 2. fill_missing_prompt: đã đúng định dạng nhưng thiếu vài trường. CHỈ hỏi
+#    những trường thiếu — liệt kê lại cả bộ sẽ khiến Gemini bám theo mẫu 18
+#    trường đã lặp nhiều lần trong thread và phớt lờ trường mới.
+fill_missing_prompt = """Đây là BIỂU MẪU các trường còn thiếu cho địa điểm vừa rồi. Chép lại NGUYÊN VĂN từng dòng rồi điền giá trị sau dấu hai chấm — TUYỆT ĐỐI KHÔNG đổi/dịch tên trường sang tiếng Việt. Không thêm gì khác, không trích dẫn nguồn. Nếu không tra được thì suy luận hợp lý từ thông tin đã biết, đừng bỏ trống:
+
+{missing}
+
+Quy ước:
+- name_en: CHỈ ghi khi quán thật sự có tên tiếng Anh chính thức. Không có thì ghi "không có" — tuyệt đối đừng bỏ dấu tên tiếng Việt rồi coi đó là tên tiếng Anh
+- category_l2: chọn ĐÚNG MỘT trong các nhãn sau, chép NGUYÊN VĂN kể cả dấu và chữ hoa/thường, không dịch, không viết tắt, không tự nghĩ nhãn mới: {l2_values}
+- must_try_dishes: 3-5 món đặc trưng, ngăn bởi dấu phẩy
+- seating_capacity: chỉ ghi con số chỗ ngồi ước lượng
+- reservation_required, alcohol_served: chỉ ghi có hoặc không
+- confidence_level: cao, trung bình hoặc thấp
+- info_expiry_note: ghi chú thông tin cần kiểm tra lại sau bao lâu"""
+
+# Từ 1/7/2025 Việt Nam sáp nhập đơn vị hành chính cấp xã/phường. Google Maps trả
+# về địa chỉ theo tên MỚI; dataset cần cả tên CŨ ở cột old_address. Không suy ra
+# được từ dữ liệu Google -> hỏi Gemini.
+# Chỉ hỏi TÊN PHƯỜNG CŨ, không đưa kèm địa chỉ hiện tại. Nếu đưa cả địa chỉ vào,
+# Gemini chỉ việc chép lại nguyên văn thay vì trả lời (đã kiểm chứng).
+# Tool tự ghép lại địa chỉ đầy đủ từ tên phường nhận được.
+# [2026-08-17] Ba lần sửa trước đều thất bại:
+#  1. Chỉ đưa "số nhà + tên đường" (cắt cụt, bỏ mất phường mới) -> thiếu ngữ
+#     cảnh, Gemini liệt kê NGUYÊN 22 phường/xã cũ (2 địa chỉ cách xa nhau ra
+#     y hệt cùng một danh sách, luôn nhặt nhầm "Lộc Thọ" vì nó đứng đầu).
+#  2. Đưa đủ địa chỉ nhưng mở đầu bằng CÂU KHẲNG ĐỊNH ("Địa chỉ đầy đủ hiện
+#     nay là: ...") rồi mới hỏi -> Gemini chỉ diễn giải lại câu khẳng định
+#     ("Cảm ơn bạn đã cung cấp địa chỉ... khu vực này thuộc phường Tây Nha
+#     Trang") mà không thực sự trả lời câu hỏi.
+#  3. Câu hỏi trực tiếp + trả lời dòng "old_ward: <tên>" -> vẫn có POI trả lời
+#     khác nhau giữa các lượt chạy lại (Đức Hưng Quán: "Lộc Thọ" rồi "Xương
+#     Huân") vì không có TÊN QUÁN làm neo ngữ cảnh, chỉ có toạ độ/địa chỉ trần —
+#     Gemini phải đoán khu vực từ địa chỉ thay vì tra cứu đúng quán.
+# Giờ đưa CẢ tên quán lẫn địa chỉ hiện tại (cùng ngữ cảnh POI đã dùng ở
+# profile_prompt/old cho search Maps), và ép output là MỘT object JSON duy nhất
+# — dễ parse chắc chắn hơn dòng "old_ward: X" (không lẫn với tiêu đề nguồn trích
+# dẫn Gemini hay chèn), lại rõ ràng hơn cho model là "chỉ điền một khoá, không
+# viết văn xuôi".
+old_address_prompt = """Quán "{poi}" hiện có địa chỉ: "{address}", thuộc thành phố {city}. Trước ngày 1/7/2025 (trước đợt sáp nhập đơn vị hành chính cấp xã/phường), địa chỉ này thuộc phường hoặc xã cũ nào?
+
+CHỈ trả lời bằng ĐÚNG MỘT object JSON theo khuôn dưới đây, không kèm bất kỳ chữ nào khác trước hoặc sau, không giải thích, không bọc trong khối markdown:
+
+{{"old_ward": "<tên phường hoặc xã cũ>"}}
+
+Ví dụ mẫu trả lời đúng: {{"old_ward": "Vĩnh Hải"}}
+
+TUYỆT ĐỐI KHÔNG liệt kê danh sách các phường/xã, KHÔNG giải thích, KHÔNG nhắc lại địa chỉ, KHÔNG mở đầu bằng lời chào hay lời cảm ơn, KHÔNG trả lời gì ngoài object JSON đó."""
+
+
+# Phân loại POI. Bảng RIÊNG ở cuối file, KHÔNG nhét vào [dataset] — bảng con
+# lọt nhầm vào bảng khác từng khiến cả khâu đối chiếu vô hiệu trong im lặng
+# (xem [nha_trang].old_wards). Kiểm chứng sau khi sửa:
+#   .venv/bin/python -c "from vsf.config import profile_settings as p; print(p('food')['category'])"
+[category]
+l1_default = "FOOD"
+
+# Cách đọc `markers` bên dưới. "blacklist" = trúng một từ thì LOẠI; "whitelist"
+# = không trúng từ nào thì loại. FOOD phải là blacklist, xem lý do ngay trên
+# `markers`; profile lưu trú thì ngược lại (config/profile_accom.toml).
+mode = "blacklist"
+
+# Ngưỡng cột price_level, theo VNĐ, tính cho MỘT SUẤT ĂN: dưới mức đầu là
+# "budget", dưới mức sau là "mid-range", trên nữa là "luxury". Nằm ở profile chứ
+# không phải hằng số trong code vì một đêm khách sạn và một bữa ăn không thể
+# chung thang giá.
+price_levels = [150000, 500000]
+
+# 5 nhãn hợp lệ DUY NHẤT của cột category_l2. Đây là nguồn sự thật cho cả
+# prompt Gemini ({l2_values}) lẫn bộ kiểm tra ở schema.normalize_l2 — sửa ở đây
+# là cả hai nơi cùng đổi, không còn ba bản danh sách trôi lệch nhau.
+l2_values = ["Nhà hàng", "Quán ăn", "Quán cà phê", "Quán Bar", "Ăn vỉa hè"]
+# Không suy ra được nhãn nào thì rơi về đây: đại đa số POI đang gán nhãn là
+# quán ăn, đoán "Quán ăn" sai ít hơn hẳn để trống.
+l2_fallback = "Quán ăn"
+
+# Nhãn ngành Google chứa một trong các từ này -> KHÔNG phải FOOD, dừng pipeline.
+# Cố ý là danh sách ĐEN chứ không phải danh sách TRẮNG: vốn từ nhãn ngành của
+# Google là mở (nhà hàng chay / quán ăn nhanh / tiệm bánh / quán hải sản /
+# quán ăn Việt Nam...), whitelist sẽ chặn nhầm quán thật trong im lặng. Một
+# khách sạn lọt qua thì lộ ngay (không có menu, dữ liệu vô nghĩa); một quán
+# thật bị chặn chỉ để lại dòng stub mà người gán nhãn khó nhận ra.
+markers = [
+  "khách sạn", "nhà nghỉ", "resort", "homestay", "villa", "hostel",
+  "spa", "salon", "phòng khám", "bệnh viện", "nha khoa",
+  "bãi biển", "công viên", "chùa", "nhà thờ", "bảo tàng", "khu du lịch",
+  "siêu thị", "trung tâm thương mại", "ngân hàng", "cây xăng",
+  "trường học", "đại học", "sân bay", "bến xe", "nhà ga",
+]
+
+# Từ khoá trong nhãn ngành Google / tên quán -> category_l2. Xét THEO THỨ TỰ,
+# khớp trước thắng, nên thứ tự dưới đây có ý nghĩa: "Quán cà phê" đứng trước
+# "Nhà hàng" vì "Nhà hàng - Cà phê ABC" nên về nhóm cà phê.
+#
+# LƯU Ý ánh xạ không phải rename cơ học từ bộ giá trị snake_case cũ:
+#  - quan_nhau cũ TÁCH ĐÔI: beer club/bia hơi/pub -> "Quán Bar", còn quán nhậu
+#    bình dân rơi về "Quán ăn" (fallback).
+#  - quan_an_vat cũ KHÔNG thành "Ăn vỉa hè": tiệm bánh/kem/chè có mặt bằng là
+#    "Quán ăn". "Ăn vỉa hè" chỉ dành cho hàng rong/xe đẩy thật.
+[[category.l2_hints]]
+keywords = ["cà phê", "ca phe", "cafe", "café", "coffee", "trà sữa", "tra sua", "tiệm trà"]
+value = "Quán cà phê"
+
+[[category.l2_hints]]
+keywords = ["bar", "pub", "bia hơi", "bia tươi", "beer", "cocktail", "lounge", "bistro"]
+value = "Quán Bar"
+
+[[category.l2_hints]]
+keywords = ["nhà hàng", "nha hang", "restaurant", "buffet"]
+value = "Nhà hàng"
+
+[[category.l2_hints]]
+keywords = ["vỉa hè", "via he", "street food", "xe đẩy", "hàng rong", "quán cóc", "gánh"]
+value = "Ăn vỉa hè"

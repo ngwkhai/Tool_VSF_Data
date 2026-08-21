@@ -18,26 +18,45 @@ from typing import Any, Callable
 from rich.console import Console
 
 from . import errors
-from .browser import Session
-from .config import output_dir, settings
+from .browser import Session, gemini_slot
+from .config import output_dir, profile_settings, settings
 from .errors import VsfError, WrongPlaceError
-from .models import PROFILE_FIELDS, POIRecord, parse_profile_block
+from .models import POIRecord, parse_profile_block
+from .profiles import get_profile, profile_for
 from .schema import classify_l1, normalize_l2
 from .paste import paste_images, upload_via_file_input
 from .sites import facebook, gemini, gmaps, tiktok
 
-# `maps` chạy TRƯỚC `gemini1`: cả cổng "không phải FOOD" lẫn cổng "lấy nhầm
-# quán" đều nằm ở bước maps, đặt trước thì cả hai bắn xong mới tốn lượt Gemini
-# nào. Bonus: gemini1 được đưa địa chỉ Google ĐÃ XÁC NHẬN thay vì --address gõ tay.
-STEPS = ["maps", "gemini1", "old_address", "menu", "tiktok", "facebook"]
+# `maps` chạy TRƯỚC `gemini1`: cả cổng phân loại ngành lẫn cổng "lấy nhầm quán"
+# đều nằm ở bước maps, đặt trước thì cả hai bắn xong mới tốn lượt Gemini nào.
+# Bonus: gemini1 được đưa địa chỉ Google ĐÃ XÁC NHẬN thay vì --address gõ tay.
+#
+# Danh sách bước là CỦA TỪNG PROFILE (bước thứ tư khác nhau: `menu` với đồ ăn,
+# `rooms` với lưu trú) — dùng `steps_for(record)`. Hằng số dưới đây là bộ của
+# profile mặc định, giữ cho những chỗ chỉ cần "một danh sách bước để hiển thị".
+STEPS = get_profile("food").STEPS
 console = Console()
+
+
+def steps_for(record: POIRecord) -> list[str]:
+    """Danh sách bước theo profile của bản ghi."""
+    return profile_for(record).STEPS
+
+
+def all_steps() -> list[str]:
+    """Hợp mọi bước của mọi profile, giữ thứ tự. Dùng để kiểm tra cờ `--only`."""
+    out: list[str] = []
+    for step in (s for p in ("food", "accom") for s in get_profile(p).STEPS):
+        if step not in out:
+            out.append(step)
+    return out
 
 
 # -- Từng bước -------------------------------------------------------------
 
 
-def _field_count(parsed: dict) -> int:
-    return sum(1 for f in PROFILE_FIELDS if parsed.get(f))
+def _field_count(parsed: dict, fields: list[str]) -> int:
+    return sum(1 for f in fields if parsed.get(f))
 
 
 def _field_template(fields: list[str]) -> str:
@@ -51,13 +70,23 @@ def _field_template(fields: list[str]) -> str:
     return "\n".join(f"{f}:" for f in fields)
 
 
-def _l2_values_clause() -> str:
-    """Danh sách nhãn category_l2 hợp lệ, dựng từ config để rót vào prompt.
+def _vocab_clauses(category_cfg: dict[str, Any]) -> dict[str, str]:
+    """Mọi khoá `[category].*_values` -> một ô cùng tên để rót vào prompt.
 
-    Một nguồn sự thật duy nhất: prompt và bộ kiểm tra ở schema.normalize_l2 cùng
-    đọc [category].l2_values, nên không còn hai bản danh sách trôi lệch nhau.
+    Một nguồn sự thật duy nhất: prompt Gemini và bộ lọc ở tầng xuất
+    (schema.normalize_l2 / schema.normalize_vocab) cùng đọc CÙNG MỘT danh sách
+    trong config CỦA CÙNG MỘT PROFILE, nên không còn hai bản trôi lệch nhau.
+
+    Quét theo hậu tố thay vì liệt kê tên: thêm một cột có bộ giá trị đóng thì chỉ
+    cần khai `<cột>_values` trong config, không phải sửa chỗ này. Profile không
+    khai khoá nào thì prompt của nó cũng không có ô tương ứng — food chỉ dùng
+    {l2_values}, dư ô khác cũng vô hại vì str.format bỏ qua khoá thừa.
     """
-    return ", ".join(f'"{v}"' for v in settings()["category"]["l2_values"])
+    return {
+        key: ", ".join(f'"{v}"' for v in values)
+        for key, values in category_cfg.items()
+        if key.endswith("_values") and isinstance(values, list)
+    }
 
 
 def _merge(base: dict, extra: dict, first_answer: str) -> dict:
@@ -76,8 +105,18 @@ def step_gemini1(s: Session, record: POIRecord, poi: str) -> None:
     Thread chat dùng lâu có thể trôi khỏi schema và Gemini trả lời văn xuôi kèm
     trích dẫn web. Khi đó gửi thêm một prompt ép định dạng rồi parse lại.
     """
-    cfg = settings()["gemini"]
-    page = s.page("gemini_profile")
+    profile = profile_for(record)
+    settings_ = profile.settings()
+    cfg = settings_["gemini"]
+    fields = profile.PROFILE_FIELDS
+    vocab = _vocab_clauses(settings_["category"])
+
+    def parse(text: str) -> dict:
+        return parse_profile_block(
+            text, fields, profile.LIST_FIELDS, profile.FIELD_ALIASES
+        )
+
+    page = s.page(gemini_slot("profile", profile.name))
     gemini.open_chat(page, cfg["profile_chat_url"])
 
     # Địa chỉ giúp Gemini phân biệt quán trùng tên khi tự tìm kiếm, giống hệt lý
@@ -90,44 +129,45 @@ def step_gemini1(s: Session, record: POIRecord, poi: str) -> None:
     prompt = cfg["profile_prompt"].format(
         poi=poi,
         address_clause=address_clause,
-        n_fields=len(PROFILE_FIELDS),
-        l2_values=_l2_values_clause(),
+        n_fields=len(fields),
+        **vocab,
     )
     answer = gemini.ask(page, prompt)
-    parsed = parse_profile_block(answer)
+    parsed = parse(answer)
 
     # Giai đoạn 1 — thread trôi khỏi schema (trả lời văn xuôi): kéo về đúng định
     # dạng bằng cách liệt kê lại cả bộ trường.
-    if _field_count(parsed) < cfg["min_fields_before_reformat"]:
+    if _field_count(parsed, fields) < cfg["min_fields_before_reformat"]:
         record.warn(
-            f"Câu trả lời đầu chỉ ra {_field_count(parsed)} trường "
+            f"Câu trả lời đầu chỉ ra {_field_count(parsed, fields)} trường "
             "(Gemini trả lời văn xuôi) — đang yêu cầu định dạng lại"
         )
-        retry = parse_profile_block(
-            gemini.ask(page, cfg["reformat_prompt"].format(fields=_field_template(PROFILE_FIELDS)))
+        retry = parse(
+            gemini.ask(page, cfg["reformat_prompt"].format(fields=_field_template(fields)))
         )
-        if _field_count(retry) > _field_count(parsed):
+        if _field_count(retry, fields) > _field_count(parsed, fields):
             parsed = _merge(parsed, retry, first_answer=answer)
 
     # Giai đoạn 2 — đúng định dạng nhưng thiếu trường: chỉ hỏi phần còn thiếu.
-    missing = [f for f in PROFILE_FIELDS if not parsed.get(f)]
+    missing = [f for f in fields if not parsed.get(f)]
     if missing:
         record.warn(
-            f"Còn {_field_count(parsed)}/{len(PROFILE_FIELDS)} trường "
+            f"Còn {_field_count(parsed, fields)}/{len(fields)} trường "
             f"— đang hỏi bổ sung: {', '.join(missing)}"
         )
         extra = gemini.ask(
             page,
             cfg["fill_missing_prompt"].format(
-                missing=_field_template(missing), l2_values=_l2_values_clause()
+                missing=_field_template(missing),
+                **vocab,
             ),
         )
-        parsed = _merge(parsed, parse_profile_block(extra), first_answer=answer)
+        parsed = _merge(parsed, parse(extra), first_answer=answer)
 
     # KHÔNG suy luận các trường còn thiếu ở đây: must_try_dishes cần thực đơn,
-    # mà bước `menu` chạy SAU bước này. Việc suy luận nằm ở tầng xuất (schema.py),
-    # lúc đó cả 4 bước đã xong.
-    still_missing = [f for f in PROFILE_FIELDS if not parsed.get(f)]
+    # mà bước `menu` chạy SAU bước này. Việc suy luận nằm ở tầng xuất
+    # (profiles/<name>.py), lúc đó cả 6 bước đã xong.
+    still_missing = [f for f in fields if not parsed.get(f)]
     if still_missing:
         parsed["_missing_fields"] = still_missing
     record.gemini_profile = parsed
@@ -137,7 +177,10 @@ def step_gemini1(s: Session, record: POIRecord, poi: str) -> None:
     # lạ ra cột — nhãn Gemini tự nghĩ vẫn nằm nguyên trong data.json.
     maps = record.google_maps or {}
     record.category_l2 = normalize_l2(
-        parsed.get("category_l2"), maps.get("category_raw", ""), maps.get("name") or poi
+        parsed.get("category_l2"),
+        maps.get("category_raw", ""),
+        maps.get("name") or poi,
+        settings_["category"],
     )
 
     if still_missing:
@@ -188,35 +231,43 @@ def _reject_wrong_place(data: dict, poi: str, record: POIRecord | None = None) -
         )
 
 
-def _reject_non_food(record: POIRecord, data: dict) -> bool:
-    """Chốt category_l1/l2 từ nhãn ngành Google. True = KHÔNG phải FOOD, dừng.
+def _reject_wrong_category(record: POIRecord, data: dict) -> bool:
+    """Chốt category_l1/l2 từ nhãn ngành Google. True = SAI nhóm ngành, dừng.
 
-    `--force-food` bỏ qua cổng này cho trường hợp nhãn Google gây hiểu nhầm
-    (vd quán ăn nằm trong khách sạn bị xếp ngành "Khách sạn").
+    Nhóm ngành đúng do profile quyết định: FOOD với `--profile food`, ACCOM với
+    `--profile accom`. Chiều của cổng cũng theo profile — danh sách đen cho đồ
+    ăn, danh sách trắng cho lưu trú (xem schema.classify_l1).
+
+    `--force-category` (bí danh `--force-food`) bỏ qua cổng này cho trường hợp
+    nhãn Google gây hiểu nhầm — vd quán ăn nằm trong khách sạn bị xếp ngành
+    "Khách sạn", hay một homestay bị Google xếp ngành "Công ty du lịch".
     """
+    category_cfg = profile_for(record).settings()["category"]
+    expected = category_cfg.get("l1_default", "FOOD")
     raw = data.get("category_raw", "")
     if record.force_food:
-        record.category_l1 = settings()["category"].get("l1_default", "FOOD")
+        record.category_l1 = expected
     else:
-        l1, certain = classify_l1(raw)
+        l1, certain = classify_l1(raw, category_cfg)
         record.category_l1 = l1
-        if l1 != "FOOD":
+        if l1 != expected:
             record.warn(
-                f"KHÔNG PHẢI FOOD: Google xếp địa điểm này vào ngành {raw!r} -> "
-                f"category_l1={l1}. Bỏ qua các bước còn lại, row.tsv chỉ có `name`. "
-                "Nếu đây là nhầm lẫn, chạy lại với --force-food."
+                f"SAI NHÓM NGÀNH: Google xếp địa điểm này vào ngành {raw!r}, "
+                f"không phải {expected} -> category_l1={l1}. Bỏ qua các bước còn "
+                "lại, row.tsv chỉ có `name`. Nếu đây là nhầm lẫn, chạy lại với "
+                "--force-category."
             )
             record.flag(errors.FLAG_NOT_FOOD)
             return True
         if not certain:
             record.warn(
-                "Không đọc được nhãn ngành của Google — mặc định coi là FOOD. "
+                f"Không đọc được nhãn ngành của Google — mặc định coi là {expected}. "
                 "Kiểm tra selector [gmaps].place_category bằng /poi-recon gmaps."
             )
             record.flag(errors.FLAG_CATEGORY_UNKNOWN)
 
     # Giá trị dự phòng từ nhãn Google; step_gemini1 ghi đè nếu Gemini trả nhãn hợp lệ.
-    record.category_l2 = normalize_l2(None, raw, data.get("name", ""))
+    record.category_l2 = normalize_l2(None, raw, data.get("name", ""), category_cfg)
     return False
 
 
@@ -243,6 +294,11 @@ def step_maps(s: Session, record: POIRecord, poi: str) -> None:
     # trên phỏng đoán từ tìm kiếm.
     if place_id_hint:
         data["opened_by_place_id"] = place_id_hint
+        # Mở bằng place_id thì ta BIẾT CHẮC place_id — không cần suy ngược từ
+        # URL. Để cột rỗng chỉ vì Google chưa kịp viết lại URL là vứt đi đúng
+        # thông tin đang cầm sẵn trong tay.
+        if not data.get("place_id"):
+            data["place_id"] = place_id_hint
     for k, v in preserved_old_address.items():
         if v is not None:
             data[k] = v
@@ -254,19 +310,25 @@ def step_maps(s: Session, record: POIRecord, poi: str) -> None:
 
     # HAI CỔNG CHẶN, đặt ngay sau basic_info — TRƯỚC khi cào giờ/ảnh/đánh giá/
     # thực đơn. Trước đây kiểm tra "lấy nhầm quán" nằm tận cuối bước nên vẫn cào
-    # trọn gói rồi mới vứt đi; giờ sai quán hoặc không phải đồ ăn là dừng ngay.
+    # trọn gói rồi mới vứt đi; giờ sai quán hoặc sai nhóm ngành là dừng ngay.
     _reject_wrong_place(data, poi, record)
-    if _reject_non_food(record, data):
+    if _reject_wrong_category(record, data):
         return
 
     data["hours"] = gmaps.opening_hours(page)
     data["photos"] = gmaps.photos(page)
     data["reviews"] = gmaps.reviews(page)
 
-    # Lấy ảnh thực đơn ở đây luôn để bước `menu` chỉ còn việc dán sang Gemini,
-    # và để `--only menu` chạy lại được mà không cần mở lại Google Maps.
-    menu = gmaps.menu_photos(page)
-    data["menu_photos"] = menu
+    # Ảnh thực đơn CHỈ có nghĩa với profile đồ ăn. Cơ sở lưu trú không có mục
+    # "Thực đơn" trên Google Maps, gọi vào chỉ tốn thời gian dò gallery rồi bắn
+    # cờ `no_menu_photos` oan cho mọi khách sạn. Bảng giá phòng do bước `rooms`
+    # hỏi thẳng Gemini, không đi qua ảnh.
+    menu: dict[str, Any] = {}
+    if "menu" in steps_for(record):
+        # Lấy ảnh thực đơn ở đây luôn để bước `menu` chỉ còn việc dán sang Gemini,
+        # và để `--only menu` chạy lại được mà không cần mở lại Google Maps.
+        menu = gmaps.menu_photos(page)
+        data["menu_photos"] = menu
 
     # ĐẶT CUỐI CÙNG, sau menu_photos: hàm này mở khung ảnh và KHÔNG quay lại
     # trang địa điểm, nên mọi thứ cần trang địa điểm phải xong trước.
@@ -304,8 +366,9 @@ def step_maps(s: Session, record: POIRecord, poi: str) -> None:
         )
         record.flag(errors.FLAG_FEW_SECONDARY_PHOTOS)
     # Gắn cờ ngay ở bước `maps`: cột `menu` để trống là do KHÔNG có ảnh thực đơn,
-    # và điều đó đã biết chắc từ đây — bước `menu` chỉ xác nhận lại.
-    if not (menu.get("images") or []):
+    # và điều đó đã biết chắc từ đây — bước `menu` chỉ xác nhận lại. Profile lưu
+    # trú không có bước `menu` nên cũng không có cờ này (xem khối menu ở trên).
+    if "menu" in steps_for(record) and not (menu.get("images") or []):
         record.flag(errors.FLAG_NO_MENU_PHOTOS)
 
 
@@ -496,11 +559,16 @@ def step_old_address(s: Session, record: POIRecord, poi: str) -> None:
     Chạy sau `maps` vì cần địa chỉ hiện tại làm đầu vào. Google chỉ có tên đơn vị
     hành chính mới, không có cách nào suy ngược ra tên cũ.
     """
-    cfg = settings()["gemini"]
+    cfg = profile_for(record).settings()["gemini"]
     address = (record.google_maps or {}).get("address")
     if not address:
         record.warn("Bỏ qua bước địa chỉ cũ: chưa có địa chỉ từ Google Maps")
         return
+
+    # Khởi tạo trước: nhánh cảnh báo cuối hàm có nhắc `answer`, mà nó chỉ được
+    # gán khi đã phải hỏi Gemini. Đọc được phường cũ ngay trong địa chỉ Google
+    # nhưng compose_old_address trả rỗng thì rơi vào đúng nhánh đó.
+    answer = ""
 
     from .schema import split_address
 
@@ -515,7 +583,7 @@ def step_old_address(s: Session, record: POIRecord, poi: str) -> None:
     source = "địa chỉ Google"
 
     if not old_ward:
-        page = s.page("gemini_profile")
+        page = s.page(gemini_slot("profile", profile_for(record).name))
         gemini.open_chat(page, cfg["profile_chat_url"])
         prompt = cfg["old_address_prompt"].format(poi=poi, address=address, city="Nha Trang")
         answer = gemini.ask(page, prompt)
@@ -551,7 +619,7 @@ def step_old_address(s: Session, record: POIRecord, poi: str) -> None:
         record.flag(errors.FLAG_OLD_ADDRESS_MISSING)
 
 
-def _looks_like_menu_json(answer: str) -> bool:
+def _looks_like_json_array(answer: str) -> bool:
     """Câu trả lời có mang một mảng JSON hợp lệ không (thay vì văn xuôi)."""
     start, end = answer.find("["), answer.rfind("]")
     if start < 0 or end <= start:
@@ -565,8 +633,8 @@ def _looks_like_menu_json(answer: str) -> bool:
 
 
 def step_menu(s: Session, record: POIRecord, poi: str) -> None:
-    """Dán ảnh thực đơn sang Gemini chat #2 và lấy phần trích xuất."""
-    cfg = settings()["gemini"]
+    """Dán ảnh thực đơn sang Gemini chat #2 và lấy phần trích xuất. (profile food)"""
+    cfg = profile_for(record).settings()["gemini"]
     urls = (record.google_maps.get("menu_photos") or {}).get("images") or []
     if not urls:
         record.warn("Bỏ qua bước thực đơn: không có ảnh thực đơn nào từ Google Maps")
@@ -574,7 +642,7 @@ def step_menu(s: Session, record: POIRecord, poi: str) -> None:
         record.menu = {"skipped": True, "reason": "không có ảnh thực đơn"}
         return
 
-    page = s.page("gemini_menu")
+    page = s.page(gemini_slot("menu", profile_for(record).name))
     gemini.open_chat(page, cfg["menu_chat_url"])
 
     outcome = paste_images(page, urls)
@@ -590,12 +658,13 @@ def step_menu(s: Session, record: POIRecord, poi: str) -> None:
     answer = gemini.wait_for_response(page, before)
 
     # Thread trôi khỏi định dạng JSON (Gemini trả lời văn xuôi) -> ép lại một
-    # lần. Không làm thì schema.menu_json() không đọc được gì và cả cột `menu`
-    # lẫn `price_min/max`/`must_try_dishes` suy từ nó đều rỗng dù dữ liệu có sẵn.
-    if not _looks_like_menu_json(answer):
+    # lần. Không làm thì profiles.food.menu_json() không đọc được gì và cả cột
+    # `menu` lẫn `price_min/max`/`must_try_dishes` suy từ nó đều rỗng dù dữ liệu
+    # có sẵn.
+    if not _looks_like_json_array(answer):
         record.warn("Thực đơn trả lời văn xuôi (không phải JSON) — đang yêu cầu định dạng lại")
         reformatted = gemini.ask(page, cfg["menu_reformat_prompt"])
-        if _looks_like_menu_json(reformatted):
+        if _looks_like_json_array(reformatted):
             answer = reformatted
         else:
             record.warn("Định dạng lại vẫn không ra JSON — giữ nguyên câu trả lời gốc trong _raw")
@@ -606,6 +675,51 @@ def step_menu(s: Session, record: POIRecord, poi: str) -> None:
         "paste_result": outcome,
         "extracted": parse_profile_block(answer),
     }
+
+
+def step_rooms(s: Session, record: POIRecord, poi: str) -> None:
+    """Hỏi Gemini chat #2 bảng giá phòng. (profile accom)
+
+    Vai trò song song với `step_menu` của profile đồ ăn, nhưng KHÔNG có ảnh:
+    Google Maps không có mục "Thực đơn" cho cơ sở lưu trú, nên nguồn duy nhất là
+    Gemini tự tra web (trang chính thức + Booking/Agoda/Traveloka). Vì thế bước
+    này không cần `maps` cung cấp gì ngoài địa chỉ để neo đúng cơ sở, và
+    `--only rooms` chạy lại được mà không phải mở lại Google Maps.
+    """
+    cfg = profile_for(record).settings()["gemini"]
+    page = s.page(gemini_slot("menu", profile_for(record).name))
+    gemini.open_chat(page, cfg["menu_chat_url"])
+
+    # Cùng lý do với gmaps.search_query() và profile_prompt: chuỗi khách sạn đặt
+    # tên lặp giữa các thành phố, không neo địa chỉ là tra nhầm cơ sở.
+    address = (record.google_maps or {}).get("address") or record.address_hint
+    address_clause = f" (địa chỉ: {address})" if address else ""
+    if not address:
+        record.warn(
+            "Giá phòng: chưa có địa chỉ từ bước maps — Gemini có thể tra nhầm "
+            "cơ sở trùng tên ở thành phố khác"
+        )
+
+    answer = gemini.ask(
+        page, cfg["room_price_prompt"].format(poi=poi, address_clause=address_clause)
+    )
+
+    # Thread trôi khỏi định dạng JSON -> ép lại một lần, y hệt bước `menu`.
+    # Không làm thì cột `room_price` lẫn `price_min/max`/`price_level` suy từ nó
+    # đều rỗng dù dữ liệu có sẵn.
+    if not _looks_like_json_array(answer):
+        record.warn("Giá phòng trả lời văn xuôi (không phải JSON) — đang yêu cầu định dạng lại")
+        reformatted = gemini.ask(page, cfg["room_price_reformat_prompt"])
+        if _looks_like_json_array(reformatted):
+            answer = reformatted
+        else:
+            record.warn("Định dạng lại vẫn không ra JSON — giữ nguyên câu trả lời gốc trong _raw")
+            # Dùng lại mã cờ cũ thay vì đẻ mã mới: cùng một triệu chứng (Gemini #2
+            # không trả JSON), cùng một cách xử lý, và hàng đợi triage không phải
+            # học thêm một mã nữa.
+            record.flag(errors.FLAG_MENU_NOT_JSON)
+
+    record.rooms = {"extracted": parse_profile_block(answer)}
 
 
 def step_tiktok(s: Session, record: POIRecord, poi: str) -> None:
@@ -670,6 +784,7 @@ HANDLERS: dict[str, Callable[[Session, POIRecord, str], None]] = {
     "maps": step_maps,
     "old_address": step_old_address,
     "menu": step_menu,
+    "rooms": step_rooms,
     "tiktok": step_tiktok,
     "facebook": step_facebook,
 }
@@ -693,8 +808,9 @@ def _skip_reason(record: POIRecord, step: str) -> str | None:
     if record.steps.get("maps") != "ok":
         return "bước maps chưa xong"
 
-    if record.category_l1 and record.category_l1 != "FOOD":
-        return "không phải FOOD"
+    expected = profile_for(record).category_l1
+    if record.category_l1 and record.category_l1 != expected:
+        return f"không phải {expected}"
 
     return None
 
@@ -741,7 +857,7 @@ def run_record(
     `step_skipped` / `saved`. Đây là chỗ duy nhất trong toàn tool mà tên bước,
     kết quả, exception và đường dẫn checkpoint cùng nằm trong tầm với.
     """
-    wanted = [only] if only else STEPS
+    wanted = [only] if only else steps_for(record)
 
     for step in wanted:
         if resume and record.steps.get(step) == "ok":
@@ -820,11 +936,18 @@ def run(
     address: str | None = None,
     place_id: str | None = None,
     force_food: bool = False,
+    profile: str = "food",
 ) -> POIRecord:
     """Chạy một POI, tự mở/đóng Session. Đây là đường vào của `vsf run`."""
     out = output_dir()
     record = prepare_record(
-        out, poi, index=index, address=address, place_id=place_id, force_food=force_food
+        out,
+        poi,
+        index=index,
+        address=address,
+        place_id=place_id,
+        force_food=force_food,
+        profile=profile,
     )
 
     with Session() as s:
@@ -843,17 +966,25 @@ def prepare_record(
     address: str | None = None,
     place_id: str | None = None,
     force_food: bool = False,
+    profile: str | None = None,
 ) -> POIRecord:
-    """Nạp (hoặc tạo) bản ghi và áp các cờ chỉ có hiệu lực cho lần chạy này."""
+    """Nạp (hoặc tạo) bản ghi và áp các cờ chỉ có hiệu lực cho lần chạy này.
+
+    `profile` bỏ trống thì GIỮ NGUYÊN profile đã lưu trong data.json. Đổi profile
+    của một bản ghi đã cào là chuyện phải cố ý làm, không nên xảy ra chỉ vì lần
+    chạy này quên truyền cờ.
+    """
     record = POIRecord.load_or_new(out, poi, index=index)
+    if profile:
+        record.profile = get_profile(profile).name
     if address:
         record.address_hint = address
     if place_id:
         record.place_id_hint = place_id
     record.force_food = force_food
-    if force_food and record.category_l1 and record.category_l1 != "FOOD":
-        # Xoá kết luận non-FOOD của lần chạy trước, nếu không cổng dưới đây chặn
-        # ngay từ bước `maps` và --force-food thành vô nghĩa.
+    if force_food and record.category_l1 and record.category_l1 != profile_for(record).category_l1:
+        # Xoá kết luận sai-nhóm-ngành của lần chạy trước, nếu không cổng ở bước
+        # `maps` chặn ngay và --force-category thành vô nghĩa.
         record.category_l1 = ""
     return record
 
@@ -904,25 +1035,29 @@ def refresh_photos(s: Session, record: POIRecord, out: Path) -> dict[str, Any]:
 
 
 def export_row(record: POIRecord, tiktok_index: int = 0, out: Path | None = None):
-    """Xuất row.tsv đúng 73 cột — đây mới là output chính thức để nạp dataset.
+    """Xuất row.tsv theo đúng bộ cột của PROFILE bản ghi — output chính thức.
 
     `out` để gọi được mà không phụ thuộc global `config._OUTPUT_OVERRIDE`; bỏ
     trống thì vẫn lấy thư mục output hiện hành như cũ.
     """
     import csv
 
-    from .schema import COLUMNS, build_row
+    from .schema import build_row
 
     out = out or output_dir()
+    profile = profile_for(record)
+    cfg = profile.settings()
     row = build_row(
         record,
-        settings().get("dataset", {}),
+        cfg["dataset"],
         tiktok_index=tiktok_index,
-        ward_map=settings().get("ward_map", {}),
+        ward_map=cfg.get("ward_map", {}),
     )
     path = out / record.slug / "row.tsv"
     with path.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=COLUMNS, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
+        writer = csv.DictWriter(
+            fh, fieldnames=profile.COLUMNS, delimiter="\t", quoting=csv.QUOTE_MINIMAL
+        )
         writer.writeheader()
         writer.writerow(row)
     return path

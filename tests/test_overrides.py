@@ -7,7 +7,8 @@ bước KHÔNG được xoá mất chỗ vừa sửa.
 from __future__ import annotations
 
 from vsf.models import POIRecord
-from vsf.schema import COLUMNS, build_row
+from vsf.profiles.food import COLUMNS
+from vsf.schema import build_row
 
 DEFAULTS = {"status": "active", "labeled_by": "Khải", "confidence_level": "Cao"}
 

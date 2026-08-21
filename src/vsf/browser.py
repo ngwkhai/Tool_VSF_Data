@@ -30,18 +30,68 @@ Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 """
 
 
+#: Hai vai trò chat Gemini. Khoá config tương ứng là `<kind>_chat_url`.
+GEMINI_KINDS = ("profile", "menu")
+
+
+def _chat_url(profile: str, kind: str) -> str:
+    from .config import profile_settings
+
+    return profile_settings(profile)["gemini"][f"{kind}_chat_url"].split("?")[0]
+
+
+def gemini_slots() -> dict[str, str]:
+    """slot -> URL thread, gom mọi thread Gemini của MỌI profile.
+
+    Mỗi thread phải có slot RIÊNG, nếu không hai thread khác nhau cùng tranh một
+    tab và mỗi lần đổi profile là một lần điều hướng thừa (tệ hơn: `open_chat`
+    thấy tab đã ở đúng tiền tố "gemini.google.com" rồi bỏ qua, và prompt bay
+    sang nhầm thread).
+
+    Khử trùng lặp theo URL: profile không khai `[gemini] profile_chat_url` riêng
+    thì dùng chung thread với profile mặc định, và dùng chung luôn cả slot —
+    không đẻ ra hai slot trỏ cùng một chỗ để `close_stray_tabs` phải đoán.
+
+    Profile mặc định giữ tên slot TRẦN (`gemini_profile`, `gemini_menu`) để tab
+    đang mở từ những lần chạy trước vẫn được nhận lại đúng.
+    """
+    from .profiles import DEFAULT, PROFILES
+
+    slots: dict[str, str] = {}
+    seen: dict[str, str] = {}
+    names = [DEFAULT] + [n for n in PROFILES if n != DEFAULT]
+    for name in names:
+        for kind in GEMINI_KINDS:
+            url = _chat_url(name, kind)
+            if url in seen:
+                continue
+            slot = f"gemini_{kind}" if name == DEFAULT else f"gemini_{kind}:{name}"
+            slots[slot] = url
+            seen[url] = slot
+    return slots
+
+
+def gemini_slot(kind: str, profile: str) -> str:
+    """Tên slot giữ thread `kind` của `profile`.
+
+    Tra NGƯỢC theo URL chứ không ghép chuỗi: profile dùng chung thread với
+    profile mặc định phải ra đúng slot trần của nó, không phải một tên mới.
+    """
+    url = _chat_url(profile, kind)
+    for slot, slot_url in gemini_slots().items():
+        if slot_url == url:
+            return slot
+    raise KeyError(f"Không có slot nào cho thread {kind!r} của profile {profile!r}")
+
+
 def slot_url_prefixes() -> dict[str, list[str]]:
     """URL đặc trưng của từng slot, dùng để nhận lại tab cũ.
 
-    Thứ tự có ý nghĩa: hai chat Gemini phải khớp trước tiền tố chung
+    Thứ tự có ý nghĩa: MỌI thread Gemini phải khớp trước tiền tố chung
     "gemini.google.com", nếu không tab nào cũng bị nhận nhầm sang slot đầu tiên.
     """
-    gemini = settings()["gemini"]
-    profile_url = gemini["profile_chat_url"].split("?")[0]
-    menu_url = gemini["menu_chat_url"].split("?")[0]
     return {
-        "gemini_profile": [profile_url],
-        "gemini_menu": [menu_url],
+        **{slot: [url] for slot, url in gemini_slots().items()},
         "gmaps": ["https://www.google.com/maps", "https://maps.google.com"],
         "tiktok": ["https://www.tiktok.com"],
         "facebook": ["https://www.facebook.com", "https://facebook.com"],

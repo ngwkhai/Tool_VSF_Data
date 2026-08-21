@@ -21,8 +21,10 @@ from ..batch.outcome import missing_steps
 from ..config import PROJECT_ROOT, output_dir, set_output_dir, settings
 from ..errors import FLAG_LABELS, flag_label, flag_severity, flags_from_warnings
 from ..models import POIRecord
-from ..pipeline import STEPS, export_row
-from ..schema import COLUMNS, build_row
+from ..pipeline import all_steps, export_row
+from ..profiles import DEFAULT as DEFAULT_PROFILE
+from ..profiles import PROFILES, get_profile, profile_for
+from ..schema import build_row
 from .runner import RUNNER
 
 router = APIRouter(prefix="/api")
@@ -35,6 +37,7 @@ class BatchCreate(BaseModel):
     out_dir: str = Field(..., description="Thư mục kết quả, vd output_19_8")
     name: str = ""
     text: str = Field("", description="Danh sách POI: CSV có tiêu đề, hoặc mỗi dòng một tên")
+    profile: str = Field(DEFAULT_PROFILE, description="Bộ dataset: food | accom")
 
 
 class StartRequest(BaseModel):
@@ -94,11 +97,12 @@ def _load_record(job: dict[str, Any], batch: dict[str, Any]) -> POIRecord:
 
 
 def _row_for(record: POIRecord, tiktok_index: int = 0) -> dict[str, str]:
+    cfg = profile_for(record).settings()
     return build_row(
         record,
-        settings().get("dataset", {}),
+        cfg["dataset"],
         tiktok_index=tiktok_index,
-        ward_map=settings().get("ward_map", {}),
+        ward_map=cfg.get("ward_map", {}),
     )
 
 
@@ -115,9 +119,13 @@ def create_batch(payload: BatchCreate) -> dict[str, Any]:
     pois = ingest.parse(payload.text)
     if not pois:
         raise HTTPException(400, "Không đọc được POI nào từ danh sách.")
+    if payload.profile not in PROFILES:
+        raise HTTPException(400, f"Profile phải là một trong: {', '.join(PROFILES)}")
 
     store.init()
-    batch_id = store.get_or_create_batch(payload.out_dir, payload.name or payload.out_dir)
+    batch_id = store.get_or_create_batch(
+        payload.out_dir, payload.name or payload.out_dir, profile=payload.profile
+    )
     for poi in pois:
         store.upsert_job(
             batch_id,
@@ -127,10 +135,12 @@ def create_batch(payload: BatchCreate) -> dict[str, Any]:
             place_id=poi.place_id,
             force_food=poi.force_food,
             only_step=poi.only_step,
+            profile=poi.profile or payload.profile,
         )
     return {
         "batch_id": batch_id,
         "added": len(pois),
+        "profile": payload.profile,
         "with_place_id": sum(1 for p in pois if p.place_id),
         "with_address": sum(1 for p in pois if p.address),
     }
@@ -219,11 +229,13 @@ def get_job(job_id: int, tiktok: int = 0) -> dict[str, Any]:
     job = _job_or_404(job_id)
     batch = _batch_or_404(job["batch_id"])
     record = _load_record(job, batch)
+    profile = profile_for(record)
     return {
         "job": job,
         "batch": batch,
         "record": {
             "poi_name": record.poi_name,
+            "profile": profile.name,
             "slug": record.slug,
             "address_hint": record.address_hint,
             "place_id_hint": getattr(record, "place_id_hint", ""),
@@ -240,12 +252,16 @@ def get_job(job_id: int, tiktok: int = 0) -> dict[str, Any]:
             "google_maps": record.google_maps,
             "gemini_profile": record.gemini_profile,
             "menu": record.menu,
+            "rooms": getattr(record, "rooms", {}),
             "tiktok": record.tiktok,
             "facebook": record.facebook,
         },
         "row": _row_for(record, tiktok_index=tiktok),
-        "columns": COLUMNS,
-        "steps": STEPS,
+        # Cột và bước LUÔN theo profile của bản ghi — giao diện không có danh
+        # sách nào của riêng nó, đây là nguồn sự thật duy nhất.
+        "profile": profile.name,
+        "columns": profile.COLUMNS,
+        "steps": profile.STEPS,
     }
 
 
@@ -264,7 +280,8 @@ def patch_row(job_id: int, payload: RowPatch) -> dict[str, Any]:
     out = _out_path(batch)
     record = _load_record(job, batch)
 
-    unknown = sorted(set(payload.overrides) - set(COLUMNS))
+    columns = profile_for(record).COLUMNS
+    unknown = sorted(set(payload.overrides) - set(columns))
     if unknown:
         raise HTTPException(400, f"Không phải cột của dataset: {', '.join(unknown)}")
 
@@ -314,8 +331,12 @@ def pick_tiktok(job_id: int, payload: TikTokPick) -> dict[str, Any]:
 def rerun_job(job_id: int, payload: RerunRequest) -> dict[str, Any]:
     """Đưa một job về hàng đợi, tuỳ chọn chỉ chạy lại đúng một bước."""
     job = _job_or_404(job_id)
-    if payload.only and payload.only not in STEPS:
-        raise HTTPException(400, f"--only phải là một trong: {', '.join(STEPS)}")
+    # Xét theo bước của ĐÚNG profile job này: `--only menu` trên một job lưu trú
+    # là lệnh vô nghĩa và phải bị chặn ngay, chứ không để worker chạy một bước
+    # không có trong chuỗi rồi ghi "ok".
+    steps = get_profile(job.get("profile") or DEFAULT_PROFILE).STEPS
+    if payload.only and payload.only not in steps:
+        raise HTTPException(400, f"--only phải là một trong: {', '.join(steps)}")
 
     store.upsert_job(
         job["batch_id"],
@@ -347,15 +368,27 @@ def stats() -> dict[str, Any]:
     flags = Counter(f for j in jobs for f in j["flags"])
 
     step_stats: dict[str, dict[str, int]] = {}
-    for step in STEPS:
+    for step in all_steps():
         counter = Counter(j["steps"].get(step, "missing") for j in jobs)
         step_stats[step] = dict(counter)
 
     # Tỉ lệ ô trống theo cột: cột nào hay trống thì hoặc nguồn không có, hoặc
     # bước cào nó đang hỏng. Đọc từ row.tsv đã ghi, không dựng lại toàn bộ.
-    blanks: Counter = Counter()
-    rows_seen = 0
+    #
+    # Đếm THEO TỪNG PROFILE. Gộp chung thì `menu` (chỉ có ở food) trông như trống
+    # 100% ở mọi POI lưu trú, và `room_price` trống ở mọi quán ăn — hai con số vô
+    # nghĩa lại đứng đầu bảng "cột hay trống nhất".
+    blanks: dict[str, Counter] = {}
+    rows_seen: Counter = Counter()
+    # Profile nào ĐANG có lô, kể cả lô chưa xuất dòng nào. Chỉ liệt kê profile
+    # đã đọc được row.tsv thì bảng "cột hay trống" biến mất sạch lúc đợt mới
+    # chưa chạy xong POI đầu tiên — đúng lúc người dùng nhìn vào nhiều nhất.
+    profiles_seen: set[str] = set()
     for batch in store.list_batches():
+        batch_profile = batch.get("profile") or DEFAULT_PROFILE
+        if batch_profile not in PROFILES:
+            batch_profile = DEFAULT_PROFILE
+        profiles_seen.add(batch_profile)
         out = _out_path(batch)
         if not out.is_dir():
             continue
@@ -370,11 +403,13 @@ def stats() -> dict[str, Any]:
                 continue
             if row is None:
                 continue
-            rows_seen += 1
-            for col in COLUMNS:
+            rows_seen[batch_profile] += 1
+            counter = blanks.setdefault(batch_profile, Counter())
+            for col in get_profile(batch_profile).COLUMNS:
                 if not (row.get(col) or "").strip():
-                    blanks[col] += 1
+                    counter[col] += 1
 
+    listed = sorted(profiles_seen) or [DEFAULT_PROFILE]
     return {
         "total": len(jobs),
         "by_status": dict(by_status),
@@ -391,9 +426,17 @@ def stats() -> dict[str, Any]:
             {"code": c, "label": lbl, "severity": sev} for c, (lbl, sev) in FLAG_LABELS.items()
         ],
         "steps": step_stats,
-        "rows_seen": rows_seen,
+        "rows_seen": sum(rows_seen.values()),
+        "rows_seen_by_profile": {name: rows_seen[name] for name in listed},
         "blank_by_column": [
-            {"column": c, "blank": blanks.get(c, 0), "total": rows_seen} for c in COLUMNS
+            {
+                "profile": name,
+                "column": c,
+                "blank": blanks.get(name, Counter()).get(c, 0),
+                "total": rows_seen[name],
+            }
+            for name in listed
+            for c in get_profile(name).COLUMNS
         ],
     }
 
@@ -405,15 +448,19 @@ def export_batch(batch_id: int) -> PlainTextResponse:
     if not out.is_dir():
         raise HTTPException(404, f"Không thấy thư mục {out}")
 
-    rows, _ = batch_export.collect(out)
+    try:
+        rows, _, profile_name = batch_export.collect(out)
+    except ValueError as exc:  # thư mục trộn hai profile
+        raise HTTPException(409, str(exc)) from None
     if not rows:
         raise HTTPException(404, "Chưa có row.tsv nào trong đợt này.")
 
+    columns = get_profile(profile_name).COLUMNS
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=COLUMNS, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
+    writer = csv.DictWriter(buf, fieldnames=columns, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
     writer.writeheader()
     for row in rows:
-        writer.writerow({col: row.get(col, "") for col in COLUMNS})
+        writer.writerow({col: row.get(col, "") for col in columns})
 
     name = Path(batch["out_dir"]).name or f"batch_{batch_id}"
     return PlainTextResponse(
@@ -444,17 +491,30 @@ def doctor() -> dict[str, Any]:
 
 @router.get("/config")
 def get_config() -> dict[str, Any]:
-    """Các ngưỡng/tham số đang có hiệu lực — để giao diện giải thích quyết định."""
+    """Các ngưỡng/tham số đang có hiệu lực — để giao diện giải thích quyết định.
+
+    `profiles` là bảng tra theo tên: cột, bước, nhãn l2 và giá trị mặc định của
+    TỪNG bộ dataset. Giao diện tra theo profile của job đang xem chứ không giữ
+    danh sách riêng — chép cứng ở phía client là cách chắc chắn nhất để hai bên
+    trôi lệch nhau.
+    """
     cfg = settings()
     return {
-        "steps": STEPS,
-        "columns": COLUMNS,
+        "default_profile": DEFAULT_PROFILE,
+        "profiles": {
+            name: {
+                "columns": p.COLUMNS,
+                "steps": p.STEPS,
+                "category_l1": p.category_l1,
+                "l2_values": p.settings()["category"].get("l2_values", []),
+                "dataset": p.settings()["dataset"],
+            }
+            for name, p in PROFILES.items()
+        },
         "output_dir": str(output_dir()),
         "tiktok": cfg.get("tiktok", {}),
         "gmaps": {k: v for k, v in cfg.get("gmaps", {}).items() if isinstance(v, (int, float))},
         "batch": cfg.get("batch", {}),
-        "category": {"l2_values": cfg.get("category", {}).get("l2_values", [])},
-        "dataset": cfg.get("dataset", {}),
     }
 
 

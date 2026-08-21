@@ -1,0 +1,372 @@
+# Profile ACCOM — POI lưu trú (khách sạn / resort / villa / homestay / nhà nghỉ),
+# 72 cột.
+#
+# File này chứa MỌI thứ phụ thuộc vào dataset: giá trị cố định của cột, bộ phân
+# loại ngành, và prompt Gemini. Phần dùng chung cho mọi profile (browser, gmaps,
+# tiktok, facebook, ward_map, URL + timeout của Gemini) nằm ở
+# config/settings.toml. Khoá trùng tên thì file này THẮNG.
+#
+# Tách file thay vì lồng [profiles.accom.*] vào settings.toml là cố ý: mỗi file
+# giữ được bảng PHẲNG. Bảng con lọt nhầm vào bảng khác từng khiến
+# settings()["old_wards"] rỗng và vô hiệu cả khâu đối chiếu trong im lặng.
+
+# Giá trị cố định điền vào các cột không lấy được từ 3 nguồn.
+[dataset]
+# Giá trị lùi cho data.json chưa có khoá `category_l1`. POI chạy mới lấy giá trị
+# do bước `maps` phân loại (xem [category], schema.classify_l1).
+category_l1 = "ACCOM"
+status = "active"
+review_status = "draft"
+booking_source = "internal"
+rating_source = "Google Maps"
+labeled_by = "Khải"
+# Mọi dòng xuất ra đều mang mức này, không dùng mức Gemini tự chấm. Người gán
+# nhãn rà lại rồi hạ xuống nếu cần.
+confidence_level = "Cao"
+info_expiry_note = "Giá phòng và chính sách nhận/trả phòng có thể thay đổi theo mùa, cần kiểm tra lại định kỳ."
+
+[gemini]
+# HAI THREAD RIÊNG của profile lưu trú, tách khỏi hai thread của profile đồ ăn.
+# Ghi đè khoá cùng tên ở settings.toml (gộp nông theo section, file profile
+# thắng). Mỗi thread có slot tab riêng — xem browser.gemini_slots().
+#
+# Vì sao tách: hai thread của food đã tích luỹ hàng trăm lượt trả biểu mẫu 26
+# trường ĐỒ ĂN. Hỏi khách sạn trên đúng thread đó thì lịch sử ngay phía trên là
+# một lực kéo ngược — Gemini bám mẫu cũ và trả về cuisine_type/must_try_dishes
+# cho một cái khách sạn.
+#
+# [2026-08-20] Tạo mới bằng cách gửi THẲNG prompt thật (không phải câu chào), và
+# đo lại ngay: thread #1 trả 27/28 trường ở lượt đầu tiên, thread #2 trả đúng
+# mảng JSON giá phòng. Tức là cảnh báo "thread rỗng làm hỏng định dạng" ghi ở
+# settings.toml KHÔNG tái diễn ở đây — nhiều khả năng vì lượt đầu đã là một
+# biểu mẫu đầy đủ nên thread không bao giờ thực sự rỗng, và vì bộ trường lưu trú
+# ít trùng với mẫu grounding "danh thiếp địa điểm" của Gemini hơn bộ đồ ăn.
+# Nếu về sau thấy tụt trường hàng loạt, đây là chỗ đầu tiên cần nghi.
+profile_chat_url = "https://gemini.google.com/app/b2c140bfc3ad5f2c?hl=vi"
+menu_chat_url = "https://gemini.google.com/app/d70840fefa84f780?hl=vi"
+
+# One-shot: hỏi ĐỦ 28 trường + quy ước trong MỘT lượt. Giữ nguyên THỦ THUẬT
+# BIỂU MẪU của profile FOOD ("chép lại nguyên văn từng dòng rồi điền vào sau dấu
+# hai chấm") — bản chỉ đưa DANH SÁCH tên trường đã từng khiến Gemini tự dịch
+# `suitable_for` thành `doi_tuong_phu_hop` và làm hỏng cả khâu parse.
+# {poi} = tên POI; {address_clause} = " (địa chỉ: ...)" nếu có địa chỉ mẫu, rỗng
+# nếu không — cùng lý do gmaps.search_query() ghép địa chỉ vào truy vấn Maps:
+# giúp Gemini không lấy nhầm cơ sở trùng tên ở tỉnh/phố khác. Chuỗi khách sạn
+# đặt tên lặp giữa các thành phố ("Mường Thanh", "Ibis") nên chốt này còn quan
+# trọng hơn ở đồ ăn.
+profile_prompt = """Cơ sở lưu trú cần tra: "{poi}"{address_clause} tại Nha Trang, Khánh Hòa (có thể có cơ sở trùng tên ở tỉnh/thành khác, nhất là với các chuỗi khách sạn — chỉ lấy đúng cơ sở này).
+
+Đây là một BIỂU MẪU (template) {n_fields} dòng. Nhiệm vụ của bạn CHỈ là chép lại NGUYÊN VĂN {n_fields} dòng dưới đây rồi điền giá trị vào ngay sau dấu hai chấm của MỖI dòng. TUYỆT ĐỐI KHÔNG được đổi, dịch, viết lại, thêm hay bớt bất kỳ tên trường nào (phần TRƯỚC dấu hai chấm) — giữ nguyên y hệt ký tự cho ký tự, kể cả khi có vẻ nó "nên" được dịch sang tiếng Việt. Không viết thêm dòng nào khác ngoài {n_fields} dòng này (không mở đầu, không dẫn nhập, không trích dẫn nguồn, không markdown, không đánh số). Nếu không tra được thì suy luận hợp lý từ thông tin đã biết, đừng bỏ trống — CHỈ được để trống nếu quy ước bên dưới cho phép:
+
+name_en:
+category_l2:
+tags:
+star_rating:
+room_types:
+total_rooms:
+check_in_time:
+check_out_time:
+key_amenities:
+breakfast_included:
+pet_friendly:
+view_type:
+brand_chain:
+booking_required:
+operating_note:
+description_short:
+description_long:
+best_time_to_visit:
+estimated_duration:
+suitable_for:
+not_suitable_for:
+insider_tips:
+weather_dependency:
+crowd_level_note:
+matched_intents:
+search_keywords:
+confidence_level:
+info_expiry_note:
+
+Quy ước:
+- name_en: CHỈ ghi khi cơ sở thật sự có tên tiếng Anh chính thức. Không có thì ghi "không có" — tuyệt đối đừng bỏ dấu tên tiếng Việt rồi coi đó là tên tiếng Anh
+- category_l2: chọn ĐÚNG MỘT trong các nhãn sau, chép NGUYÊN VĂN kể cả dấu và chữ hoa/thường, không dịch, không viết tắt, không tự nghĩ nhãn mới: {l2_values}
+- tags: chọn NHIỀU nhãn phù hợp (thường 4-8), chép NGUYÊN VĂN kể cả dấu, chữ hoa/thường và dấu gạch chéo bên trong nhãn, ngăn các nhãn bằng dấu chấm phẩy ";". CHỈ được dùng nhãn trong danh sách sau, không tự nghĩ nhãn mới, không mô tả bằng câu văn: {tags_values}
+- star_rating: chỉ ghi dạng "3 sao", "4 sao", "5 sao". Cơ sở không xếp hạng sao (homestay, nhà nghỉ, villa) thì để trống
+- room_types: các hạng phòng, ngăn bởi dấu phẩy (ví dụ: Superior, Deluxe, Suite)
+- total_rooms: chỉ ghi con số tổng số phòng
+- check_in_time, check_out_time: chỉ ghi giờ dạng 24h "14:00", "11:30"
+- key_amenities: 8-12 tiện nghi nổi bật, ngăn bởi dấu phẩy
+- breakfast_included, pet_friendly, booking_required: chỉ ghi có hoặc không
+- view_type: chọn NHIỀU nhãn phù hợp (thường 1-3), chép NGUYÊN VĂN kể cả dấu, chữ hoa/thường và dấu gạch chéo bên trong nhãn, ngăn các nhãn bằng dấu chấm phẩy ";". CHỈ được dùng nhãn trong danh sách sau, không tự nghĩ nhãn mới, không mô tả bằng câu văn: {view_type_values}. Cơ sở không có view đáng kể thì để trống
+- brand_chain: tên chuỗi/thương hiệu quản lý. Cơ sở độc lập thì để trống
+- description_short: ĐÚNG 2 CÂU, mỗi câu kết thúc bằng dấu chấm
+- description_long: ĐÚNG 5 CÂU, mỗi câu kết thúc bằng dấu chấm
+- suitable_for: chọn NHIỀU nhãn phù hợp (thường 3-6), chép NGUYÊN VĂN kể cả dấu, chữ hoa/thường và dấu gạch chéo bên trong nhãn, ngăn các nhãn bằng dấu chấm phẩy ";". CHỈ được dùng nhãn trong danh sách sau, không tự nghĩ nhãn mới, không mô tả bằng câu văn: {suitable_for_values}
+- not_suitable_for: chọn NHIỀU nhãn phù hợp (thường 2-4), chép NGUYÊN VĂN kể cả dấu, chữ hoa/thường và dấu gạch chéo bên trong nhãn, ngăn các nhãn bằng dấu chấm phẩy ";". CHỈ được dùng nhãn trong danh sách sau, không tự nghĩ nhãn mới, không mô tả bằng câu văn: {not_suitable_for_values}
+- matched_intents: chọn NHIỀU nhãn phù hợp (thường 3-6), chép NGUYÊN VĂN kể cả dấu phẩy bên trong nhãn, ngăn các nhãn bằng dấu chấm phẩy ";". CHỈ được dùng nhãn trong danh sách sau, không tự nghĩ nhãn mới, không ghi câu tìm kiếm: {matched_intents_values}
+- estimated_duration: tính theo ĐÊM, ví dụ "2-5 đêm"
+- confidence_level: cao, trung bình hoặc thấp
+- info_expiry_note: ghi chú thông tin cần kiểm tra lại sau bao lâu"""
+
+# Bảng giá phòng — vai trò y hệt menu_prompt của profile FOOD, nhưng khách sạn
+# KHÔNG có tab "Thực đơn" trên Google Maps để chụp ảnh dán vào. Nguồn duy nhất
+# là Gemini tự tra web, nên prompt phải nêu rõ nguồn cần tra thay vì trông chờ
+# vào ảnh đính kèm.
+#
+# "gia" quy ước theo NGHÌN ĐỒNG để khớp với schema.menu_prices() — hàm đó luôn
+# nhân 1000, nên nếu Gemini trả giá đầy đủ VNĐ thì price_min/price_max sẽ sai
+# gấp 1000 lần. Đây đúng là cái bẫy đã ghi ở menu_prompt, giữ nguyên cách chống.
+room_price_prompt = """Tra bảng giá phòng của cơ sở lưu trú "{poi}"{address_clause} tại Nha Trang, Khánh Hòa. Tham khảo trang chính thức của cơ sở và các trang đặt phòng phổ biến (Booking.com, Agoda, Traveloka). Lấy giá công bố cho MỘT ĐÊM, hạng khách 2 người tiêu chuẩn, ngoài mùa cao điểm.
+
+Trả về ĐÚNG một mảng JSON theo khuôn:
+[
+  {{"loai_phong":"hạng phòng","ten":"tên đầy đủ của phòng","gia":"số"}}
+]
+
+Quy tắc:
+- dùng đúng ba khoá trên, mỗi phòng một dòng, xếp từ rẻ đến đắt
+- "loai_phong" là hạng phòng gọn (Superior, Deluxe, Executive, Family, Suite...); "ten" là tên đầy đủ như trang đặt phòng hiển thị
+- "gia" là chuỗi SỐ NGUYÊN theo đơn vị NGHÌN ĐỒNG: phòng 1.030.000đ ghi "1030", phòng 890.000đ ghi "890". KHÔNG nhân thêm số 0, KHÔNG dùng dấu phẩy hay dấu chấm ngăn nghìn, KHÔNG kèm "đ"/"VND"/"k"
+- giá là một khoảng thì lấy cận dưới
+- không tra được giá của một phòng thì để "gia" là chuỗi rỗng, vẫn giữ dòng đó
+- giữ nguyên dấu tiếng Việt
+- chỉ trả về mảng JSON, không markdown, không giải thích, không trích dẫn nguồn"""
+
+# Gửi khi câu trả lời giá phòng trôi khỏi định dạng JSON. Không nêu lại bảng giá
+# — Gemini vẫn nhìn thấy câu trả lời văn xuôi ngay phía trên, chỉ cần ép khuôn.
+room_price_reformat_prompt = """Hãy trình bày lại bảng giá phòng vừa tra ở trên dưới dạng một mảng JSON, mỗi phòng là một object với đúng ba khoá "loai_phong", "ten" và "gia". "gia" chỉ ghi số nguyên theo đơn vị nghìn đồng, KHÔNG dùng dấu phẩy ngăn nghìn (ví dụ 1.030.000 đồng ghi là "1030", không ghi "1,030,000"). Chỉ trả về mảng JSON, không kèm giải thích, không bọc trong khối markdown."""
+
+# Hai prompt cho hai tình huống khác nhau — đừng gộp làm một (xem
+# profile_food.toml, cùng lý do):
+#
+# 1. reformat_prompt: thread trôi khỏi schema, Gemini trả lời văn xuôi. Phải
+#    liệt kê LẠI CẢ BỘ trường để kéo nó về đúng định dạng.
+reformat_prompt = """Hãy trình bày lại thông tin trên theo đúng BIỂU MẪU dưới đây: chép lại NGUYÊN VĂN từng dòng rồi điền giá trị sau dấu hai chấm. TUYỆT ĐỐI KHÔNG đổi/dịch tên trường (phần trước dấu hai chấm) sang tiếng Việt. Không thêm tiêu đề, không đánh số, không trích dẫn nguồn:
+{fields}"""
+
+# 2. fill_missing_prompt: đã đúng định dạng nhưng thiếu vài trường. CHỈ hỏi
+#    những trường thiếu — liệt kê lại cả bộ sẽ khiến Gemini bám theo mẫu đã lặp
+#    nhiều lần trong thread và phớt lờ trường mới.
+fill_missing_prompt = """Đây là BIỂU MẪU các trường còn thiếu cho cơ sở lưu trú vừa rồi. Chép lại NGUYÊN VĂN từng dòng rồi điền giá trị sau dấu hai chấm — TUYỆT ĐỐI KHÔNG đổi/dịch tên trường sang tiếng Việt. Không thêm gì khác, không trích dẫn nguồn. Nếu không tra được thì suy luận hợp lý từ thông tin đã biết, đừng bỏ trống:
+
+{missing}
+
+Quy ước:
+- name_en: CHỈ ghi khi cơ sở thật sự có tên tiếng Anh chính thức. Không có thì ghi "không có" — tuyệt đối đừng bỏ dấu tên tiếng Việt rồi coi đó là tên tiếng Anh
+- category_l2: chọn ĐÚNG MỘT trong các nhãn sau, chép NGUYÊN VĂN kể cả dấu và chữ hoa/thường, không dịch, không viết tắt, không tự nghĩ nhãn mới: {l2_values}
+- tags: chọn NHIỀU nhãn phù hợp (thường 4-8), chép NGUYÊN VĂN kể cả dấu, chữ hoa/thường và dấu gạch chéo bên trong nhãn, ngăn các nhãn bằng dấu chấm phẩy ";". CHỈ được dùng nhãn trong danh sách sau, không tự nghĩ nhãn mới, không mô tả bằng câu văn: {tags_values}
+- star_rating: chỉ ghi dạng "3 sao", "4 sao", "5 sao". Cơ sở không xếp hạng sao thì để trống
+- room_types: các hạng phòng, ngăn bởi dấu phẩy
+- total_rooms: chỉ ghi con số tổng số phòng
+- check_in_time, check_out_time: chỉ ghi giờ dạng 24h "14:00", "11:30"
+- key_amenities: 8-12 tiện nghi nổi bật, ngăn bởi dấu phẩy
+- breakfast_included, pet_friendly, booking_required: chỉ ghi có hoặc không
+- view_type: chọn NHIỀU nhãn phù hợp (thường 1-3), chép NGUYÊN VĂN kể cả dấu, chữ hoa/thường và dấu gạch chéo bên trong nhãn, ngăn các nhãn bằng dấu chấm phẩy ";". CHỈ được dùng nhãn trong danh sách sau, không tự nghĩ nhãn mới, không mô tả bằng câu văn: {view_type_values}. Cơ sở không có view đáng kể thì để trống
+- brand_chain: tên chuỗi quản lý, cơ sở độc lập thì để trống
+- description_short: ĐÚNG 2 CÂU, mỗi câu kết thúc bằng dấu chấm
+- description_long: ĐÚNG 5 CÂU, mỗi câu kết thúc bằng dấu chấm
+- suitable_for: chọn NHIỀU nhãn phù hợp (thường 3-6), chép NGUYÊN VĂN kể cả dấu, chữ hoa/thường và dấu gạch chéo bên trong nhãn, ngăn các nhãn bằng dấu chấm phẩy ";". CHỈ được dùng nhãn trong danh sách sau, không tự nghĩ nhãn mới, không mô tả bằng câu văn: {suitable_for_values}
+- not_suitable_for: chọn NHIỀU nhãn phù hợp (thường 2-4), chép NGUYÊN VĂN kể cả dấu, chữ hoa/thường và dấu gạch chéo bên trong nhãn, ngăn các nhãn bằng dấu chấm phẩy ";". CHỈ được dùng nhãn trong danh sách sau, không tự nghĩ nhãn mới, không mô tả bằng câu văn: {not_suitable_for_values}
+- matched_intents: chọn NHIỀU nhãn phù hợp (thường 3-6), chép NGUYÊN VĂN kể cả dấu phẩy bên trong nhãn, ngăn các nhãn bằng dấu chấm phẩy ";". CHỈ được dùng nhãn trong danh sách sau, không tự nghĩ nhãn mới, không ghi câu tìm kiếm: {matched_intents_values}
+- estimated_duration: tính theo ĐÊM, ví dụ "2-5 đêm"
+- confidence_level: cao, trung bình hoặc thấp
+- info_expiry_note: ghi chú thông tin cần kiểm tra lại sau bao lâu"""
+
+# Giống hệt profile FOOD — đợt sáp nhập phường/xã 1/7/2025 không liên quan gì
+# tới loại hình POI. Chỉ đổi "Quán" thành "Cơ sở lưu trú"; phần còn lại giữ
+# NGUYÊN VĂN vì mỗi câu chữ ở đây đã đổi bằng ba lần thất bại (xem
+# config/profile_food.toml để biết ba lần đó là gì).
+old_address_prompt = """Cơ sở lưu trú "{poi}" hiện có địa chỉ: "{address}", thuộc thành phố {city}. Trước ngày 1/7/2025 (trước đợt sáp nhập đơn vị hành chính cấp xã/phường), địa chỉ này thuộc phường hoặc xã cũ nào?
+
+CHỈ trả lời bằng ĐÚNG MỘT object JSON theo khuôn dưới đây, không kèm bất kỳ chữ nào khác trước hoặc sau, không giải thích, không bọc trong khối markdown:
+
+{{"old_ward": "<tên phường hoặc xã cũ>"}}
+
+Ví dụ mẫu trả lời đúng: {{"old_ward": "Vĩnh Hải"}}
+
+TUYỆT ĐỐI KHÔNG liệt kê danh sách các phường/xã, KHÔNG giải thích, KHÔNG nhắc lại địa chỉ, KHÔNG mở đầu bằng lời chào hay lời cảm ơn, KHÔNG trả lời gì ngoài object JSON đó."""
+
+
+# Phân loại POI. Bảng RIÊNG ở CUỐI file, KHÔNG nhét vào [dataset] — bảng con lọt
+# nhầm vào bảng khác từng khiến cả khâu đối chiếu vô hiệu trong im lặng (xem
+# [nha_trang].old_wards). Kiểm chứng sau khi sửa:
+#   .venv/bin/python -c "from vsf.config import profile_settings as p; print(p('accom')['category'])"
+[category]
+l1_default = "ACCOM"
+
+# NGƯỢC HẲN với profile FOOD: đây là danh sách TRẮNG. Nhãn ngành Google KHÔNG
+# chứa từ nào dưới đây -> không phải cơ sở lưu trú, dừng pipeline.
+#
+# FOOD phải dùng blacklist vì vốn từ nhãn ngành đồ ăn của Google là MỞ (nhà hàng
+# chay / quán ăn nhanh / tiệm bánh / quán hải sản / quán ăn Việt Nam...) — không
+# liệt kê hết được, whitelist sẽ chặn nhầm quán thật trong im lặng. Vốn từ lưu
+# trú thì ngược lại: ĐÓNG và nhỏ, Google chỉ dùng đúng mấy nhãn dưới đây. Ở đây
+# blacklist mới là cái bất khả thi (phải liệt kê MỌI ngành không phải lưu trú),
+# nên chiều của cổng chặn đảo lại.
+mode = "whitelist"
+markers = [
+  "khách sạn", "nhà nghỉ", "resort", "khu nghỉ dưỡng",
+  "homestay", "hostel", "motel", "guest house", "guesthouse",
+  "villa", "biệt thự", "căn hộ dịch vụ", "nhà khách", "lưu trú",
+]
+
+# Ngưỡng cột price_level, theo VNĐ, tính cho MỘT ĐÊM: dưới mức đầu là "budget",
+# dưới mức sau là "mid-range", trên nữa là "luxury". KHÔNG dùng chung ngưỡng
+# 150k/500k của profile FOOD — đó là thang giá một bữa ăn, đem áp cho một đêm
+# phòng thì mọi khách sạn đều thành "luxury".
+price_levels = [700000, 2000000]
+
+# 5 nhãn hợp lệ DUY NHẤT của cột category_l2. Đây là nguồn sự thật cho cả prompt
+# Gemini ({l2_values}) lẫn bộ kiểm tra ở schema.normalize_l2 — sửa ở đây là cả
+# hai nơi cùng đổi, không còn hai bản danh sách trôi lệch nhau.
+l2_values = ["Resort", "Khách sạn", "Villa", "Homestay", "Nhà nghỉ"]
+# Không suy ra được nhãn nào thì rơi về đây: đại đa số POI lưu trú đang gán nhãn
+# là khách sạn, đoán "Khách sạn" sai ít hơn hẳn để trống.
+l2_fallback = "Khách sạn"
+
+# Bộ giá trị hợp lệ DUY NHẤT của cột matched_intents. Khác `l2_values` ở chỗ đây
+# là NHIỀU lựa chọn — một khách sạn thường khớp 3-6 ý định.
+#
+# Nguồn sự thật cho cả prompt Gemini ({matched_intents_values}) lẫn bộ lọc ở
+# schema.normalize_intents. Không có bộ lọc thì Gemini trả về câu tìm kiếm thay
+# vì nhãn (đã gặp: "Đặt khách sạn giá rẻ Nha Trang, tìm khách sạn phố Tây..." —
+# đó là search_keywords, không phải ý định).
+#
+# LƯU Ý hai nhãn có DẤU PHẨY bên trong ("Nghỉ dưỡng, thư giãn" và "Ghé nhanh,
+# tiện đường"). Vì thế cột này KHÔNG được xử lý bằng `as_list` như các cột danh
+# sách khác — tách theo dấu phẩy là vỡ chúng thành bốn mảnh vô nghĩa. Xem
+# schema.normalize_intents.
+matched_intents_values = [
+  "Lưu trú lâu ngày",
+  "Hẹn hò lãng mạn",
+  "Trăng mật",
+  "Gia đình có trẻ nhỏ",
+  "Gia đình đi cuối tuần",
+  "Nhóm bạn",
+  "Công tác",
+  "Nghỉ dưỡng, thư giãn",
+  "Check-in",
+  "Tiết kiệm chi phí",
+  "Trải nghiệm cao cấp",
+  "Trải nghiệm như người bản địa",
+  "Săn phòng có view đẹp",
+  "Ghé nhanh, tiện đường",
+  "Đi một mình",
+  "Nghỉ dưỡng tại chỗ không di chuyển xa",
+  "Nghỉ qua đêm gần sân bay/bến xe",
+  "Đi cùng thú cưng",
+]
+
+# --- Bộ giá trị đóng của 4 cột nhãn còn lại -------------------------------
+#
+# Cùng vai trò với `matched_intents_values` ở trên và dựng theo đúng khuôn đó:
+# mỗi khoá kết thúc bằng `_values` tự động trở thành một ô cùng tên trong prompt
+# Gemini (xem pipeline._vocab_clauses) và là whitelist cho schema.normalize_vocab
+# ở tầng xuất. Thêm một cột có bộ giá trị đóng thì chỉ cần khai thêm ở ĐÂY.
+#
+# Danh sách do người gán nhãn chốt (bảng ACCOM). Chép NGUYÊN VĂN, kể cả cách đặt
+# dấu cách quanh dấu "/" — đó là cách viết sẽ ra tới file TSV. Riêng khâu so khớp
+# thì miễn nhiễm với dấu cách và dấu "/" (normalize_vocab bỏ dấu rồi gộp mọi ký
+# tự không phải chữ/số thành một khoảng trắng), nên Gemini viết "spa/trị liệu"
+# vẫn khớp "spa / trị liệu".
+
+# `tags` — nhãn mô tả tổng hợp, một cơ sở thường khớp 4-8 nhãn.
+tags_values = [
+  "khách sạn",
+  "khu nghỉ dưỡng",
+  "villa",
+  "cao cấp / 5 sao/ sang trọng",
+  "4 sao",
+  "bình dân / 3 sao",
+  "sát biển",
+  "view biển",
+  "trung tâm thành phố",
+  "view núi/thành phố",
+  "hồ bơi vô cực",
+  "hồ bơi ngoài trời",
+  "spa / trị liệu",
+  "nhà hàng / buffet",
+  "bbq",
+  "gym",
+  "gia đình",
+  "cặp đôi",
+  "nhóm bạn",
+  "công tác/ hội nghị",
+  "biệt thự",
+  "hiện đại",
+]
+
+# `suitable_for` — nhóm khách nên ở đây. LƯU Ý ba nhãn lồng nhau ("gia đình",
+# "gia đình có trẻ em", "đại gia đình"): normalize_vocab xét nhãn DÀI trước rồi
+# xoá phần đã khớp, nên "gia đình có trẻ em" không bị "gia đình" ăn mất.
+suitable_for_values = [
+  "cặp đôi",
+  "gia đình",
+  "nhóm bạn",
+  "khách đi một mình / tự túc",
+  "khách ở dài ngày",
+  "khách quốc tế",
+  "làm việc từ xa",
+  "nghỉ dưỡng",
+  "kỷ niệm",
+  "gia đình có trẻ em",
+  "đại gia đình",
+  "teambuilding",
+  "sự kiện",
+  "hội nghị / hội thảo",
+  "người cao tuổi",
+  "người trẻ",
+]
+
+# `not_suitable_for` — nhóm khách KHÔNG nên ở đây.
+not_suitable_for_values = [
+  "khách mang theo thú cưng",
+  "du lịch bụi / ngân sách thấp",
+  "khách tìm phòng siêu rẻ",
+  "cặp đôi tối ưu chi phí",
+  "khách tìm nơi yên tĩnh",
+  "khách muốn ở trung tâm",
+  "người di chuyển không thuận tiện",
+  "nhóm thích tiệc tùng ồn ào",
+  "khách muốn tự nấu nướng",
+  "khách đòi hỏi resort có bãi biển riêng khép kín",
+]
+
+# `view_type` — hướng nhìn từ phòng. "attraction_view" giữ NGUYÊN dạng snake_case
+# của bảng gốc, không Việt hoá: dataset đang dùng đúng chuỗi đó.
+view_type_values = [
+  "biển",
+  "núi",
+  "thành phố",
+  "hồ bơi",
+  "sân vườn",
+  "attraction_view",
+]
+
+# Từ khoá trong nhãn ngành Google / tên cơ sở -> category_l2. Xét THEO THỨ TỰ,
+# khớp trước thắng, nên thứ tự dưới đây có ý nghĩa:
+#  - "Resort" đứng TRƯỚC "Khách sạn" vì "Khách sạn & Resort ABC" nên về nhóm
+#    resort — nhãn cụ thể hơn thắng nhãn tổng quát.
+#  - "Villa" đứng trước "Homestay" vì nhiều villa cho thuê tự mô tả là homestay,
+#    nhưng hình thái (nguyên căn, có sân vườn) mới là thứ dataset cần phân biệt.
+#  - "Nhà nghỉ" xuống cuối: nó là fallback của phân khúc thấp, còn "hostel" thì
+#    đã có nhãn riêng ở trên nên không rơi nhầm xuống đây.
+[[category.l2_hints]]
+keywords = ["resort", "khu nghỉ dưỡng", "khu du lịch nghỉ dưỡng"]
+value = "Resort"
+
+[[category.l2_hints]]
+keywords = ["villa", "biệt thự"]
+value = "Villa"
+
+[[category.l2_hints]]
+keywords = ["homestay", "hostel", "guest house", "guesthouse", "căn hộ dịch vụ", "apartment"]
+value = "Homestay"
+
+[[category.l2_hints]]
+keywords = ["khách sạn", "hotel", "motel"]
+value = "Khách sạn"
+
+[[category.l2_hints]]
+keywords = ["nhà nghỉ", "nhà khách"]
+value = "Nhà nghỉ"

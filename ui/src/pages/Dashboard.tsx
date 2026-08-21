@@ -8,9 +8,10 @@ import type { StepStatus } from "../types";
    thích cạnh sáu thanh số liệu làm loãng đúng thứ người ta mở trang để xem. */
 const STEP_NOTE: Record<string, string> = {
   maps: "Google Maps — giữ hai cổng chặn, hỏng là cả chuỗi dừng",
-  gemini1: "Gemini #1 — 26 trường mô tả",
+  gemini1: "Gemini #1 — bộ trường mô tả POI",
   old_address: "Phường trước sáp nhập 1/7/2025",
-  menu: "Gemini #2 — trích thực đơn từ ảnh",
+  menu: "Gemini #2 — trích thực đơn từ ảnh (profile food)",
+  rooms: "Gemini #2 — tra bảng giá phòng trên web (profile accom)",
   tiktok: "Tìm và chấm điểm video",
   facebook: "Xác minh Trang rồi lấy Reels",
 };

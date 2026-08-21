@@ -1,4 +1,4 @@
-import type { Batch, Check, Job, JobDetail, Stats } from "./types";
+import type { AppConfig, Batch, Check, Job, JobDetail, Stats } from "./types";
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -26,10 +26,11 @@ const post = (path: string, body?: unknown) =>
 export const api = {
   batches: () => call<{ batches: Batch[]; running: number | null }>("/batches"),
 
-  createBatch: (payload: { out_dir: string; name: string; text: string }) =>
+  createBatch: (payload: { out_dir: string; name: string; text: string; profile: string }) =>
     call<{
       batch_id: number;
       added: number;
+      profile: string;
       with_place_id: number;
       with_address: number;
     }>("/batches", {
@@ -75,6 +76,7 @@ export const api = {
     post(`/jobs/${id}/rerun`, { only: payload.only ?? null, force_food: !!payload.force_food }),
 
   stats: () => call<Stats>("/stats"),
+  config: () => call<AppConfig>("/config"),
   reindex: () => post("/reindex"),
   doctor: () => call<{ checks: Check[]; healthy: boolean; degraded: string[] }>("/doctor"),
   exportUrl: (id: number) => `/api/export/${id}.tsv`,

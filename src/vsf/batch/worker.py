@@ -143,6 +143,7 @@ def _run_one(
         address=job["address_hint"] or None,
         place_id=job.get("place_id") or None,
         force_food=job["force_food"],
+        profile=job.get("profile") or None,
     )
 
     try:

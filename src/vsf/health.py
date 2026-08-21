@@ -44,11 +44,15 @@ def check_all() -> list[Check]:
     with browser.Session() as s:
         checks.append(Check("Chrome + cổng CDP", True, f"cổng {cfg['browser']['cdp_port']}"))
 
-        for slot, key, label in [
-            ("gemini_profile", "profile_chat_url", "Gemini chat #1 (hồ sơ POI)"),
-            ("gemini_menu", "menu_chat_url", "Gemini chat #2 (thực đơn)"),
-        ]:
-            page = s.goto(slot, cfg["gemini"][key], force=True)
+        # Duyệt MỌI thread Gemini đang khai báo, không phải đúng hai cái. Từ khi
+        # mỗi profile có thể khai cặp thread riêng, kiểm tra cứng 2 thread nghĩa
+        # là hai thread của profile lưu trú không bao giờ được doctor rà tới —
+        # và lỗi chỉ lộ ra giữa một đợt chạy đêm.
+        for slot, url in browser.gemini_slots().items():
+            kind = "#1 (hồ sơ POI)" if slot.startswith("gemini_profile") else "#2 (thực đơn / giá phòng)"
+            owner = slot.split(":", 1)[1] if ":" in slot else "food"
+            label = f"Gemini chat {kind} — profile {owner}"
+            page = s.goto(slot, url, force=True)
             page.wait_for_timeout(2500)
             signed_in = "accounts.google.com" not in page.url
             has_editor = page.locator("rich-textarea, [contenteditable='true']").count() > 0

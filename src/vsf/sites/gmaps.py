@@ -263,11 +263,20 @@ def open_place(page: Page, poi: str, address_hint: str = "", place_id: str = "")
 
     # URL là nguồn lấy lat/long/place_id, nhưng SPA cập nhật nó SAU khi tiêu đề
     # hiện ra. Không chờ thì page.url vẫn là URL tìm kiếm và ta mất cả ba trường.
+    #
+    # Chờ theo NỘI DUNG lấy được, không theo hình dạng chuỗi. Điều kiện cũ
+    # ("/maps/place/" nằm trong URL) đúng với luồng tìm kiếm nhưng SAI hoàn toàn
+    # với luồng place_id: URL mở bằng place_id ĐÃ chứa sẵn "/maps/place/"
+    # (`/maps/place/?q=place_id:…`) nên vòng chờ thoả ngay lập tức và ta đọc URL
+    # TRƯỚC khi Google chuyển hướng sang dạng chuẩn `/maps/place/<tên>/@lat,lng`.
+    # Hệ quả: lat, long và place_id đều rỗng trong khi mọi trường đọc từ DOM vẫn
+    # đủ — hỏng câm, và hỏng với ĐÚNG những POI đã bỏ công tra place_id (đã gặp:
+    # cả 2/2 POI của output_20_8).
     try:
         wait_until(
-            lambda: "/maps/place/" in current_url(page),
-            timeout=20.0,
-            what="URL chuyển sang dạng trang địa điểm",
+            lambda: location_from_url(current_url(page)).get("lat") is not None,
+            timeout=30.0,
+            what="URL Google Maps hiện toạ độ của địa điểm",
         )
     except TimeoutError:
         pass  # vẫn lấy được các trường khác từ DOM
@@ -711,8 +720,26 @@ def _open_reviews_tab(page: Page) -> None:
     human_delay()
 
 
+def _sort_button(page: Page):
+    """Nút mở menu SẮP XẾP đánh giá — không phải nút lọc nguồn.
+
+    Trang khách sạn có hai nút cùng class; xem chú thích ở [gmaps]
+    sort_option_labels trong selectors.toml. Nút sắp xếp nhận diện bằng NHÃN
+    (luôn là lựa chọn đang áp dụng), không bằng vị trí.
+    """
+    labels = {_normalize(x) for x in sel_list("gmaps", "sort_option_labels")}
+    buttons = page.locator(sel("gmaps", "sort_button"))
+    for i in range(buttons.count()):
+        button = buttons.nth(i)
+        if _normalize(button.get_attribute("aria-label") or "") in labels:
+            return button
+    # Không khớp nhãn nào (Google đổi chữ?) -> lùi về hành vi cũ thay vì bỏ hẳn
+    # bước đánh giá. Sai nút thì hỏng ồn ào ngay ở đây, dễ lần ra hơn cột rỗng.
+    return buttons.first
+
+
 def _set_sort(page: Page, index: int) -> None:
-    page.locator(sel("gmaps", "sort_button")).first.click()
+    _sort_button(page).click()
     page.wait_for_selector(sel("gmaps", "sort_option"), timeout=15_000)
     page.locator(sel("gmaps", "sort_option")).nth(index).click()
     page.wait_for_timeout(3000)
@@ -774,6 +801,15 @@ def _parse_reviews(page: Page) -> list[dict[str, Any]]:
         if stars.count():
             label = stars.first.get_attribute("aria-label") or ""
             if m := re.search(r"(\d+)", label):
+                review["stars"] = int(m.group(1))
+        else:
+            # [2026-08-20] Trang KHÁCH SẠN gộp đánh giá nhiều nguồn (Google +
+            # Tripadvisor) và hiện điểm dạng TEXT "5/5", không có
+            # span[role='img'][aria-label*='sao'] như trang quán ăn. Không đọc
+            # được số sao thì card bị loại ở cuối hàm -> cả hai cột bình luận
+            # rỗng trong im lặng dù quán có 867 đánh giá (đã gặp: "Lucky Sun
+            # Hotel"). Đọc luôn phần "N/5" trong text làm phương án lùi.
+            if m := re.search(r"\b([1-5])\s*/\s*5\b", card.inner_text()):
                 review["stars"] = int(m.group(1))
 
         date = card.locator(sel("gmaps", "review_date"))

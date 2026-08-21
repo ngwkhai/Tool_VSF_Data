@@ -6,20 +6,38 @@ Giá trị mong đợi lấy từ dòng dữ liệu ĐÚNG do người dùng cun
 
 import json
 
-from vsf.config import settings
+from vsf.config import profile_settings
+from vsf.profiles.food import COLUMNS
 from vsf.schema import (
-    COLUMNS,
     boolean,
     build_row,
-    menu_price_range,
+    classify_l1 as _classify_l1,
     money,
+    normalize_l2 as _normalize_l2,
     parse_amount,
-    price_level_for,
+    price_level_for as _price_level_for,
+    price_range as menu_price_range,
     quoted_comments,
     slug_dest,
     split_address,
 )
 from vsf.models import POIRecord
+
+# Bộ phân loại và thang giá giờ là CỦA PROFILE, không còn hằng số cấp module.
+# Bọc lại để phần thân test bên dưới vẫn đọc như cũ.
+CAT = profile_settings("food")["category"]
+
+
+def classify_l1(raw):
+    return _classify_l1(raw, CAT)
+
+
+def normalize_l2(value, category_raw="", name=""):
+    return _normalize_l2(value, category_raw, name, CAT)
+
+
+def price_level_for(avg):
+    return _price_level_for(avg, CAT["price_levels"])
 
 
 def test_column_count_and_order_match_dataset():
@@ -177,7 +195,7 @@ def test_build_row_matches_sample_values():
     row = build_row(_sample_record(), DEFAULTS)
     assert row["category_l1"] == "FOOD"
     # category_l2 giờ tự điền, và phải là một trong 5 nhãn hợp lệ.
-    assert row["category_l2"] in settings()["category"]["l2_values"]
+    assert row["category_l2"] in CAT["l2_values"]
     assert row["name"] == "Nha Trang Quán Xí Mộng"
     assert row["lat"] == "12.1996" and row["long"] == "109.2054"
     assert row["place_id"] == "ChIJYeOaSmdhcDERIUrnIkft-LE"
@@ -244,14 +262,14 @@ def test_signature_dishes_prefers_dac_biet_section():
         {"loai_thuc_pham": "Đặc biệt", "ten": "Cá nhúng giấm", "gia": "160"},
         {"loai_thuc_pham": "Khai vị", "ten": "Đậu hũ chiên", "gia": "50"},
     ])
-    from vsf.schema import signature_dishes
+    from vsf.profiles.food import signature_dishes
     dishes = signature_dishes(menu)
     assert "Cá nóc nhím um cari" in dishes
     assert "Đậu hũ chiên" not in dishes
 
 
 def test_signature_dishes_falls_back_to_priciest_items():
-    from vsf.schema import signature_dishes
+    from vsf.profiles.food import signature_dishes
     menu = json.dumps([
         {"loai_thuc_pham": "Ốc", "ten": "Ốc rẻ", "gia": "40"},
         {"loai_thuc_pham": "Tôm", "ten": "Tôm hùm", "gia": "1700"},
@@ -265,7 +283,7 @@ def test_name_en_strips_diacritics():
 
 
 def test_derive_missing_fills_gaps_without_overwriting():
-    from vsf.schema import derive_missing
+    from vsf.profiles.food import derive_missing
     record = _sample_record()
     derived = derive_missing(record.gemini_profile, record)
     # Quán bình dân (100k/người) thì không cần đặt bàn.
@@ -388,7 +406,7 @@ def test_parse_menu_price_uses_upper_bound_of_range():
 
 
 def test_signature_dishes_ranks_ranges_against_flat_prices_correctly():
-    from vsf.schema import signature_dishes
+    from vsf.profiles.food import signature_dishes
     # Combo 345k phải đứng trên mẹt 180-195k. Trước đây "180 - 195" bị đọc thành
     # 180.195.000đ nên luôn chiếm vị trí đầu.
     menu = json.dumps([
@@ -409,7 +427,7 @@ def test_single_price_keeps_only_lower_bound():
 
 
 def test_menu_column_collapses_every_price_to_one_number():
-    from vsf.schema import menu_json
+    from vsf.profiles.food import menu_json
     record = _sample_record()
     record.menu = {"extracted": {"_raw":
         'Kết quả:\n[{"ten": "Cuốn Đặc Biệt", "gia": "25 - 28"},'
@@ -424,7 +442,7 @@ def test_menu_json_maps_geminis_fixed_alt_schema_keys():
     # thay vì loai_thuc_pham/ten/gia dù prompt yêu cầu rõ ràng — "price" là SỐ
     # nguyên đầy đủ VNĐ (165000), phải quy về "nghìn" ("165") để khớp
     # menu_prices() vốn luôn nhân 1000 khi đọc lại.
-    from vsf.schema import menu_json
+    from vsf.profiles.food import menu_json
     record = _sample_record()
     record.menu = {"extracted": {"_raw": json.dumps([
         {"name": "Chicken Skewer", "description": "...", "price": 165000, "category": "Main"},
@@ -436,7 +454,7 @@ def test_menu_json_maps_geminis_fixed_alt_schema_keys():
 
 
 def test_menu_json_alt_schema_missing_price_leaves_gia_blank():
-    from vsf.schema import menu_json
+    from vsf.profiles.food import menu_json
     record = _sample_record()
     record.menu = {"extracted": {"_raw": json.dumps(
         [{"name": "Bí ẩn", "category": "Main"}]
@@ -446,7 +464,7 @@ def test_menu_json_alt_schema_missing_price_leaves_gia_blank():
 
 
 def test_menu_json_is_indented_valid_json():
-    from vsf.schema import menu_json
+    from vsf.profiles.food import menu_json
     record = _sample_record()
     record.menu = {"extracted": {"_raw": '[{"ten": "Phở", "gia": "45"}]'}}
     text = menu_json(record)
@@ -478,14 +496,12 @@ def test_must_try_dishes_is_comma_separated_in_row():
 
 
 def test_classify_l1_accepts_every_food_label():
-    from vsf.schema import classify_l1
     for raw in ["Nhà hàng hải sản", "Quán cà phê", "Quán ăn Việt Nam",
                 "Tiệm bánh", "Quán bar", "Nhà hàng chay"]:
         assert classify_l1(raw) == ("FOOD", True), raw
 
 
 def test_classify_l1_rejects_non_food_labels():
-    from vsf.schema import classify_l1
     for raw in ["Khách sạn 3 sao", "Bãi biển", "Siêu thị", "Bảo tàng", "Spa"]:
         assert classify_l1(raw) == ("OTHER", True), raw
 
@@ -496,7 +512,6 @@ def test_classify_l1_fails_open_when_label_missing():
     Chặn nhầm một quán thật chỉ để lại dòng stub mà người gán nhãn khó nhận ra;
     một khách sạn lọt qua thì lộ ngay vì không có menu.
     """
-    from vsf.schema import classify_l1
     assert classify_l1("") == ("FOOD", False)
     assert classify_l1("   ") == ("FOOD", False)
 
@@ -505,13 +520,11 @@ def test_classify_l1_ignores_the_place_name():
     """CHỈ xét nhãn ngành Google. "Nhà hàng - Khách sạn Yasaka" có chữ "khách
     sạn" trong TÊN nhưng vẫn là chỗ ăn — lấy tên vào so khớp là tự tạo dương
     tính giả, nên classify_l1 không nhận tên vào."""
-    from vsf.schema import classify_l1
     assert classify_l1("Nhà hàng") == ("FOOD", True)
 
 
 def test_normalize_l2_returns_canonical_spelling():
     """Gemini gõ sai hoa/thường hoặc thiếu dấu -> vẫn về đúng cách viết chuẩn."""
-    from vsf.schema import normalize_l2
     assert normalize_l2("quán cà phê") == "Quán cà phê"
     assert normalize_l2("QUÁN BAR") == "Quán Bar"
     assert normalize_l2("Ăn via he") == "Ăn vỉa hè"
@@ -520,13 +533,11 @@ def test_normalize_l2_returns_canonical_spelling():
 
 def test_normalize_l2_never_emits_an_invalid_label():
     """Nhãn Gemini tự nghĩ (kể cả bộ snake_case CŨ) không bao giờ ra tới cột."""
-    from vsf.schema import normalize_l2
     assert normalize_l2("quan_ca_phe", "Nhà hàng hải sản", "X") == "Nhà hàng"
     assert normalize_l2("Tiệm tạp hoá", "Quán cà phê", "Y") == "Quán cà phê"
 
 
 def test_normalize_l2_infers_from_google_label_then_name():
-    from vsf.schema import normalize_l2
     assert normalize_l2(None, "Quán bar Sky", "") == "Quán Bar"
     assert normalize_l2(None, "", "Cà Phê Sách Hồng Tươi") == "Quán cà phê"
     assert normalize_l2(None, "", "Nhà hàng Yến Sào") == "Nhà hàng"
@@ -534,13 +545,11 @@ def test_normalize_l2_infers_from_google_label_then_name():
 
 def test_normalize_l2_falls_back_for_a_plain_eatery():
     """Quán ăn thường không có từ khoá nào -> l2_fallback, KHÔNG để trống."""
-    from vsf.schema import normalize_l2
     assert normalize_l2(None, "", "Bánh Canh Trần Văn Ơn") == "Quán ăn"
 
 
 def test_normalize_l2_matches_on_word_boundaries_not_substrings():
     """Khớp chuỗi con cho dương tính giả rất khó thấy."""
-    from vsf.schema import normalize_l2
     # "pub" nằm trong "gastropub", "bar" nằm trong "barbecue".
     assert normalize_l2(None, "", "ZAVOD restaurant & gastropub") == "Nhà hàng"
     assert normalize_l2(None, "", "Quán Barbecue Ngon") == "Quán ăn"
@@ -551,13 +560,11 @@ def test_normalize_l2_trusts_the_google_label_over_the_place_name():
 
     Gộp chung thì thứ tự khai báo hint quyết định thay vì độ tin cậy của nguồn.
     """
-    from vsf.schema import normalize_l2
     assert normalize_l2(None, "Quán bar", "ZAVOD restaurant & gastropub") == "Quán Bar"
     assert normalize_l2(None, "Nhà hàng", "Cà Phê Sách Hồng Tươi") == "Nhà hàng"
 
 
 def test_classify_l1_does_not_reject_spaghetti_for_containing_spa():
-    from vsf.schema import classify_l1
     assert classify_l1("Nhà hàng Spaghetti") == ("FOOD", True)
     assert classify_l1("Spa") == ("OTHER", True)
 
@@ -689,7 +696,7 @@ def test_degroup_thousands_leaves_plain_numbers_alone():
 def test_menu_json_handles_comma_formatted_prices_from_gemini():
     """Gemini đôi khi phớt lờ chỉ dẫn và trả giá đầy đủ VNĐ có dấu phẩy —
     không quy đổi trước thì regex tách số sẽ đọc '1,100,000' thành '1'."""
-    from vsf.schema import menu_json
+    from vsf.profiles.food import menu_json
     record = POIRecord(poi_name="X")
     record.menu = {"extracted": {"_raw": json.dumps([
         {"ten": "Tôm nướng", "gia": "129,000"},

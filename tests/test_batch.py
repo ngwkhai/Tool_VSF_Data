@@ -419,3 +419,146 @@ def test_without_place_id_the_gate_still_blocks():
     data = {"name": "Greek Kitchen", "address": "Phố khác", "name_match": 0.5}
     with pytest.raises(WrongPlaceError):
         _reject_wrong_place(data, "Greek Cuisine", POIRecord(poi_name="Greek Cuisine"))
+
+
+# -- Hai profile sống chung -------------------------------------------------
+
+
+def test_reindex_round_trips_the_profile_from_disk(tmp_path, db):
+    """`profile` nằm trong data.json nên reindex biết chắc, không phải đoán."""
+    from vsf.batch import reindex
+    from vsf.profiles import get_profile
+
+    out = tmp_path / "output_accom"
+    _write_poi(
+        out, "1_lucky-sun",
+        poi_name="Lucky Sun Hotel", profile="accom",
+        steps={s: "ok" for s in get_profile("accom").STEPS},
+    )
+    result = reindex.reindex_dir(out, db_path=db)
+    assert store.list_jobs(result["batch_id"], db_path=db)[0]["profile"] == "accom"
+
+
+def test_reindex_stamps_the_profile_onto_the_batch_too(tmp_path, db):
+    """Không có bước này thì mọi lô dựng lại bằng reindex đều mang nhãn 'food',
+    và trang thống kê đếm ô trống theo bộ cột SAI."""
+    from vsf.batch import reindex
+    from vsf.profiles import get_profile
+
+    out = tmp_path / "output_accom"
+    _write_poi(
+        out, "1_lucky-sun",
+        poi_name="Lucky Sun Hotel", profile="accom",
+        steps={s: "ok" for s in get_profile("accom").STEPS},
+    )
+    res = reindex.reindex_dir(out, db_path=db)
+    assert store.get_batch(res["batch_id"], db_path=db)["profile"] == "accom"
+
+
+def test_reindex_leaves_the_profile_alone_for_an_empty_directory(tmp_path, db):
+    """Thư mục rỗng không có căn cứ nào để chốt — đừng đoán bừa về 'food'."""
+    from vsf.batch import reindex
+
+    out = tmp_path / "output_accom"
+    out.mkdir(parents=True)
+    bid = store.get_or_create_batch(str(out), db_path=db, profile="accom")
+    reindex.reindex_dir(out, db_path=db)
+    assert store.get_batch(bid, db_path=db)["profile"] == "accom"
+
+
+def test_reindex_never_downgrades_an_accom_job_to_food(tmp_path, db):
+    """Cùng bài học với place_id: rỗng không được ghi đè giá trị đã có.
+
+    Không có chốt `_STICKY` thì một lần upsert thiếu `profile` là cả đợt lưu trú
+    âm thầm quay về bộ 73 cột của đồ ăn — chỉ lộ ra ở lần export sau.
+    """
+    bid = store.get_or_create_batch("output_accom", db_path=db, profile="accom")
+    store.upsert_job(bid, "Khách sạn A", seq=1, profile="accom", db_path=db)
+    store.upsert_job(bid, "Khách sạn A", seq=1, db_path=db)  # không truyền profile
+    assert store.list_jobs(bid, db_path=db)[0]["profile"] == "accom"
+
+
+def test_adding_to_an_existing_batch_does_not_change_its_profile(db):
+    """`batch add` lần hai là thêm POI, không phải đổi bộ cột của đợt đang dở."""
+    first = store.get_or_create_batch("output_accom", db_path=db, profile="accom")
+    again = store.get_or_create_batch("output_accom", db_path=db, profile="food")
+    assert again == first
+    assert store.get_batch(first, db_path=db)["profile"] == "accom"
+
+
+def test_missing_steps_uses_the_profile_step_list(tmp_path):
+    """POI lưu trú không có bước `menu` và không bao giờ bị báo là thiếu nó."""
+    from vsf.batch.outcome import missing_steps
+    from vsf.models import POIRecord
+
+    record = POIRecord(poi_name="Khách sạn A", profile="accom")
+    record.steps = {"maps": "ok", "gemini1": "ok"}
+    assert "menu" not in missing_steps(record)
+    assert "rooms" in missing_steps(record)
+
+
+def test_a_failed_step_outside_the_profile_list_still_shows_as_failed(tmp_path):
+    """Bước hỏng không được biến mất thành `done` chỉ vì đổi profile."""
+    from vsf.batch.outcome import derive_status
+    from vsf.models import POIRecord
+
+    record = POIRecord(poi_name="X", profile="accom")
+    record.steps = {"maps": "ok", "menu": "failed"}
+    assert derive_status(record)[0] == "failed"
+
+
+def test_export_refuses_a_directory_mixing_two_profiles(tmp_path):
+    """Hai bộ cột khác nhau không gộp chung một file TSV được."""
+    import csv as _csv
+
+    from vsf.batch import export as batch_export
+    from vsf.profiles import get_profile
+
+    out = tmp_path / "output_mixed"
+    for folder, profile in (("1_quan-a", "food"), ("2_khach-san-b", "accom")):
+        d = _write_poi(out, folder, poi_name=folder, profile=profile)
+        with (d / "row.tsv").open("w", encoding="utf-8", newline="") as fh:
+            cols = get_profile(profile).COLUMNS
+            w = _csv.DictWriter(fh, fieldnames=cols, delimiter="\t")
+            w.writeheader()
+            w.writerow({c: "" for c in cols})
+
+    with pytest.raises(ValueError, match="trộn nhiều profile"):
+        batch_export.merge(out)
+
+
+def test_ui_finds_a_record_saved_without_an_index(tmp_path):
+    """`vsf run` không --index ghi ra `<slug>/`, reindex gán seq=1 -> phải khớp.
+
+    Không có nhánh lùi trong `folder_for`, `load_or_new` lặng lẽ trả bản ghi
+    RỖNG và mọi cột lấy từ Google (lat/long/place_id...) trống trơn trên giao
+    diện dù data.json trên đĩa đầy đủ.
+    """
+    from vsf.models import POIRecord
+
+    out = tmp_path / "output_x"
+    _write_poi(out, "quan-a", poi_name="Quán A", google_maps={"lat": 12.34, "place_id": "ChIJx"})
+
+    rec = POIRecord.load_or_new(out, "Quán A", index=1)
+    assert rec.google_maps.get("place_id") == "ChIJx"
+    assert rec.slug == "quan-a"
+
+
+def test_numbered_folder_still_wins_when_it_exists(tmp_path):
+    """Có đúng thư mục đánh số thì dùng nó, không lùi về bản không số."""
+    from vsf.models import POIRecord
+
+    out = tmp_path / "output_x"
+    _write_poi(out, "quan-a", poi_name="Quán A", google_maps={"place_id": "khong-so"})
+    _write_poi(out, "1_quan-a", poi_name="Quán A", google_maps={"place_id": "co-so"})
+
+    assert POIRecord.load_or_new(out, "Quán A", index=1).google_maps["place_id"] == "co-so"
+
+
+def test_new_poi_with_an_index_still_gets_a_numbered_folder(tmp_path):
+    """POI chưa từng chạy vẫn phải ra `<index>_<slug>`, không mất cách đánh số."""
+    from vsf.models import POIRecord
+
+    out = tmp_path / "output_x"
+    out.mkdir(parents=True)
+    assert POIRecord.folder_for(out, "Quán Mới", 3).name == "3_quan-moi"

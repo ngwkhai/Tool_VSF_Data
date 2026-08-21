@@ -31,6 +31,7 @@ _PLACE_ID_KEYS = ("place_id", "placeid", "id")
 _INDEX_KEYS = ("index", "seq", "stt", "so_thu_tu")
 _FORCE_FOOD_KEYS = ("force_food", "forcefood", "ep_food")
 _ONLY_KEYS = ("only", "only_step", "buoc")
+_PROFILE_KEYS = ("profile", "dataset", "bo_du_lieu")
 
 _TRUE = {"1", "true", "yes", "y", "x", "co", "có"}
 
@@ -54,6 +55,9 @@ class ParsedPOI:
     place_id: str = ""
     force_food: bool = False
     only_step: str | None = None
+    # Rỗng = theo profile của cả đợt (cờ --profile của `batch add`). Chỉ khai ở
+    # đây khi muốn một dòng lẻ chạy bộ dataset khác với phần còn lại.
+    profile: str = ""
 
 
 def _pick(row: dict[str, str], keys: tuple[str, ...]) -> str:
@@ -154,6 +158,7 @@ def parse(text: str) -> list[ParsedPOI]:
                     place_id=_pick(row, _PLACE_ID_KEYS),
                     force_food=_pick(row, _FORCE_FOOD_KEYS).lower() in _TRUE,
                     only_step=_pick(row, _ONLY_KEYS) or None,
+                    profile=_pick(row, _PROFILE_KEYS).strip().lower(),
                 )
             )
     else:

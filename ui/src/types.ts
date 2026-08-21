@@ -8,6 +8,9 @@ export type JobStatus =
 
 export type StepStatus = "ok" | "failed" | "skipped" | "pending" | "missing";
 
+/** Bộ dataset của một POI: "food" (73 cột) hay "accom" (72 cột). */
+export type ProfileName = string;
+
 export interface Batch {
   id: number;
   name: string;
@@ -15,6 +18,7 @@ export interface Batch {
   created_at: string;
   status: "idle" | "running" | "paused" | "done" | "cancelled";
   note: string;
+  profile: ProfileName;
   counts: Partial<Record<JobStatus, number>>;
   total: number;
 }
@@ -26,6 +30,7 @@ export interface Job {
   poi_name: string;
   address_hint: string;
   place_id: string;
+  profile: ProfileName;
   force_food: boolean;
   only_step: string | null;
   status: JobStatus;
@@ -72,6 +77,7 @@ export interface GoogleMapsBlock {
 
 export interface PoiRecord {
   poi_name: string;
+  profile: ProfileName;
   slug: string;
   address_hint: string;
   place_id_hint: string;
@@ -88,6 +94,7 @@ export interface PoiRecord {
   google_maps: GoogleMapsBlock;
   gemini_profile: Record<string, unknown>;
   menu: Record<string, unknown>;
+  rooms: Record<string, unknown>;
   tiktok: TikTokCandidate[];
   facebook: Record<string, unknown>;
 }
@@ -97,8 +104,28 @@ export interface JobDetail {
   batch: Batch;
   record: PoiRecord;
   row: Record<string, string>;
+  /** Cột và bước LUÔN theo profile của bản ghi — giao diện không giữ danh sách
+   *  riêng, chép cứng ở client là cách chắc chắn nhất để hai bên trôi lệch. */
+  profile: ProfileName;
   columns: string[];
   steps: string[];
+}
+
+export interface ProfileConfig {
+  columns: string[];
+  steps: string[];
+  category_l1: string;
+  l2_values: string[];
+  dataset: Record<string, string>;
+}
+
+export interface AppConfig {
+  default_profile: ProfileName;
+  profiles: Record<ProfileName, ProfileConfig>;
+  output_dir: string;
+  tiktok: Record<string, unknown>;
+  gmaps: Record<string, number>;
+  batch: Record<string, unknown>;
 }
 
 export interface FlagStat {
@@ -115,7 +142,13 @@ export interface Stats {
   known_flags: { code: string; label: string; severity: "block" | "warn" }[];
   steps: Record<string, Partial<Record<StepStatus, number>>>;
   rows_seen: number;
-  blank_by_column: { column: string; blank: number; total: number }[];
+  rows_seen_by_profile: Record<ProfileName, number>;
+  blank_by_column: {
+    profile: ProfileName;
+    column: string;
+    blank: number;
+    total: number;
+  }[];
 }
 
 export interface Check {

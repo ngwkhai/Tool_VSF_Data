@@ -85,10 +85,26 @@ def reindex_dir(
     rel = str(path.relative_to(PROJECT_ROOT)) if path.is_relative_to(PROJECT_ROOT) else str(path)
 
     store.init(db_path)
-    batch_id = store.get_or_create_batch(rel, name or rel, db_path=db_path)
+    records = list(scan_dir(path))
+
+    # Profile của cả lô, đọc từ data.json trên đĩa. Quét TRƯỚC khi tạo lô để lô
+    # mới ra đời đã đúng bộ dataset; lô cũ thì chốt lại bên dưới, vì reindex đọc
+    # từ nguồn sự thật nên nó được phép sửa chỉ mục. Không có bước này thì mọi lô
+    # dựng lại bằng reindex đều mang nhãn 'food' — trang thống kê đếm ô trống
+    # theo bộ cột sai, và file tổng hợp xuất theo profile của lô cũng sai luôn.
+    # Thư mục trộn hai profile (hoặc rỗng) thì KHÔNG chốt gì cả — để nguyên giá
+    # trị đang có thay vì đoán bừa; `batch export` sẽ báo lỗi rõ ràng khi tới đó.
+    found = {getattr(r, "profile", "") or "food" for _, r in records}
+    profile = next(iter(found)) if len(found) == 1 else None
+
+    batch_id = store.get_or_create_batch(
+        rel, name or rel, db_path=db_path, profile=profile or "food"
+    )
+    if profile and store.get_batch(batch_id, db_path=db_path)["profile"] != profile:
+        store.set_batch_profile(batch_id, profile, db_path=db_path)
 
     counts: dict[str, int] = {}
-    for seq, record in scan_dir(path):
+    for seq, record in records:
         status, error_code, error_message = derive_status(record)
         counts[status] = counts.get(status, 0) + 1
         store.upsert_job(
@@ -99,6 +115,9 @@ def reindex_dir(
             # Round-trip qua đĩa. Cùng với bộ chặn `_STICKY` ở store, place_id do
             # người dùng nạp không bao giờ bị reindex xoá mất.
             place_id=getattr(record, "place_id_hint", ""),
+            # Cũng round-trip qua đĩa: `profile` nằm trong data.json nên reindex
+            # biết chắc, không phải đoán từ DB.
+            profile=getattr(record, "profile", "") or "food",
             db_path=db_path,
             # reindex là nguồn sự thật -> ghi đè cả trạng thái, vì nó đọc thẳng
             # từ data.json chứ không phải đoán.

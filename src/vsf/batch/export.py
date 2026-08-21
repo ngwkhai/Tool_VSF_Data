@@ -15,11 +15,12 @@ Hai điểm không được làm khác đi:
 from __future__ import annotations
 
 import csv
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..schema import COLUMNS
+from ..profiles import DEFAULT, get_profile
 
 _INDEX = re.compile(r"^(\d+)_")
 
@@ -34,16 +35,42 @@ class MergeResult:
     path: Path | None = None
     rows: list[dict[str, str]] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    #: Profile của cả đợt — quyết định bộ cột của file tổng hợp.
+    profile: str = DEFAULT
 
     @property
     def with_url(self) -> int:
         return sum(1 for r in self.rows if r.get("raw_url"))
 
 
-def collect(out_dir: Path) -> tuple[list[dict[str, str]], list[str]]:
-    """Đọc row.tsv của mọi POI trong thư mục đợt, theo đúng thứ tự số."""
+def _folder_profile(folder: Path) -> str:
+    """Profile của một POI, đọc từ data.json cạnh row.tsv.
+
+    row.tsv KHÔNG tự nói nó thuộc bộ cột nào (đọc header rồi đoán thì một đợt
+    dở dang, cột trống, sẽ đoán sai), nên nguồn sự thật vẫn là data.json — đúng
+    như mọi chỗ khác trong tool.
+    """
+    data_json = folder / "data.json"
+    if not data_json.is_file():
+        return DEFAULT
+    try:
+        data = json.loads(data_json.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return DEFAULT
+    return (data.get("profile") or DEFAULT) if isinstance(data, dict) else DEFAULT
+
+
+def collect(out_dir: Path) -> tuple[list[dict[str, str]], list[str], str]:
+    """Đọc row.tsv của mọi POI trong thư mục đợt, theo đúng thứ tự số.
+
+    Trả thêm profile chung của đợt. Một thư mục TRỘN hai profile là lỗi cấu hình
+    chứ không phải chuyện bình thường: hai bộ cột khác nhau không gộp được vào
+    một file TSV, và im lặng lấy bộ này áp cho bộ kia thì file tổng hợp mất dữ
+    liệu mà không có dấu hiệu gì.
+    """
     rows: list[dict[str, str]] = []
     skipped: list[str] = []
+    profiles: dict[str, list[str]] = {}
     folders = sorted((p for p in out_dir.iterdir() if p.is_dir()), key=sort_key)
     for folder in folders:
         tsv = folder / "row.tsv"
@@ -56,17 +83,29 @@ def collect(out_dir: Path) -> tuple[list[dict[str, str]], list[str]]:
             skipped.append(f"{folder.name}: row.tsv rỗng")
             continue
         rows.append(found[0])
-    return rows, skipped
+        profiles.setdefault(_folder_profile(folder), []).append(folder.name)
+
+    if len(profiles) > 1:
+        detail = "; ".join(
+            f"{name} ({len(items)} POI, vd {items[0]})" for name, items in sorted(profiles.items())
+        )
+        raise ValueError(
+            f"Thư mục {out_dir} trộn nhiều profile: {detail}. Hai bộ cột khác nhau "
+            "không gộp chung một file TSV được — tách thành hai thư mục đợt riêng."
+        )
+
+    return rows, skipped, next(iter(profiles), DEFAULT)
 
 
-def write(rows: list[dict[str, str]], target: Path) -> Path:
+def write(rows: list[dict[str, str]], target: Path, profile: str = DEFAULT) -> Path:
+    columns = get_profile(profile).COLUMNS
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=COLUMNS, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
+        writer = csv.DictWriter(fh, fieldnames=columns, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
         writer.writeheader()
         for row in rows:
-            # Chỉ giữ đúng 73 cột của schema, phòng khi row.tsv cũ có cột thừa/thiếu.
-            writer.writerow({col: row.get(col, "") for col in COLUMNS})
+            # Chỉ giữ đúng bộ cột của profile, phòng khi row.tsv cũ thừa/thiếu cột.
+            writer.writerow({col: row.get(col, "") for col in columns})
     return target
 
 
@@ -76,11 +115,11 @@ def merge(out_dir: str | Path, target: str | Path | None = None) -> MergeResult:
     if not out_dir.is_dir():
         raise FileNotFoundError(f"Không thấy thư mục {out_dir}")
 
-    rows, skipped = collect(out_dir)
-    result = MergeResult(rows=rows, skipped=skipped)
+    rows, skipped, profile = collect(out_dir)
+    result = MergeResult(rows=rows, skipped=skipped, profile=profile)
     if not rows:
         return result
 
     path = Path(target) if target else out_dir / f"tong_hop_{len(rows)}_poi.tsv"
-    result.path = write(rows, path)
+    result.path = write(rows, path, profile)
     return result

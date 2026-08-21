@@ -1,7 +1,16 @@
-"""Ánh xạ dữ liệu đã thu thập sang đúng schema 73 cột của dataset.
+"""Bộ công cụ DÙNG CHUNG của tầng xuất dữ liệu.
 
 Đây là hình thái output CHÍNH THỨC. `data.json` chỉ là bản ghi trung gian để
 checkpoint; file TSV sinh ra từ đây mới là thứ đưa vào dataset.
+
+Bộ CỘT và hàm `build_row` thật sự nằm ở `vsf.profiles.food` / `vsf.profiles.accom`
+— mỗi dataset một bộ. File này giữ phần không phụ thuộc dataset (định dạng số,
+tách địa chỉ, chuẩn hoá phường, chọn video, áp override) để hai profile dùng
+chung thay vì mỗi bên một bản trôi lệch nhau.
+
+CỐ Ý KHÔNG có `COLUMNS` ở đây. Một `COLUMNS` cấp module sẽ là bộ cột của FOOD,
+và mọi chỗ lỡ dùng nó cho bản ghi ACCOM sẽ âm thầm cắt còn 73 cột sai tên thay
+vì báo lỗi. Muốn lấy cột thì đi qua `profiles.get_profile(record.profile)`.
 """
 
 from __future__ import annotations
@@ -9,34 +18,9 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from datetime import date
-from typing import Any
+from typing import Any, Callable, Iterable
 
 from .models import POIRecord
-
-# Thứ tự cột PHẢI khớp tuyệt đối với dataset. Đừng sắp xếp lại.
-COLUMNS = [
-    "poi_id", "category_l1", "name", "name_en", "category_l2", "tags",
-    "cuisine_type", "must_try_dishes", "menu", "price_per_person_avg",
-    "seating_capacity", "dietary_options", "reservation_required", "dress_code",
-    "alcohol_served", "view_type", "lat", "long", "old_address", "address",
-    "ward", "city", "region", "place_id", "distance_from_reference_km",
-    "reference_point", "open_time", "close_time", "phone", "contact",
-    "operating_note", "price_min", "price_max", "price_level", "booking_required",
-    "booking_source", "rating_score", "review_count", "rating_source",
-    "cover_image_url", "gallery_urls", "positive_comments", "negative_comments",
-    "description_short", "description_long", "best_time_to_visit",
-    "estimated_duration", "suitable_for", "not_suitable_for", "insider_tips",
-    "source_url", "video_posted_date", "verified_date", "confidence_level",
-    "info_expiry_note", "nearby_poi_ids", "complementary_poi_ids",
-    "alternative_poi_ids", "weather_dependency", "crowd_level_note",
-    "matched_intents", "search_keywords", "nearby_hotel_ids", "status",
-    "labeled_by", "review_status", "reviewer_note", "last_updated", "by_pass",
-    "dest", "raw_url", "raw_cover_image_url", "raw_gallery_urls",
-]
-
-# Tra cứu O(1) cho apply_overrides — chặn khoá lạ trước khi nó đẻ ra cột thứ 74.
-_COLUMN_SET = frozenset(COLUMNS)
 
 # Số URL trong cột raw_gallery_urls. Đây là quy ước của DATASET (đúng 3 ảnh phụ),
 # không phải tham số cào — nên nó nằm ở tầng xuất chứ không ở [gmaps] settings,
@@ -76,8 +60,10 @@ REGION_BY_CITY = {
     "kiên giang": "Đồng bằng sông Cửu Long",
 }
 
-# Ngưỡng phân loại mức giá theo chi phí trung bình mỗi người (VNĐ).
-PRICE_LEVELS = [(150_000, "budget"), (500_000, "mid-range"), (float("inf"), "luxury")]
+# Ba mức của cột price_level. NGƯỠNG thì nằm ở [category].price_levels của từng
+# profile, không nằm ở đây: một bữa ăn và một đêm phòng không thể chung thang
+# giá (150k/500k của FOOD đem áp cho khách sạn thì mọi POI đều thành "luxury").
+PRICE_LEVEL_LABELS = ("budget", "mid-range", "luxury")
 
 _NUMBER = re.compile(r"[\d][\d.,]*")
 
@@ -283,13 +269,19 @@ def split_address(address: str | None) -> dict[str, str]:
     return out
 
 
-def price_level_for(avg: int | None) -> str:
+def price_level_for(avg: int | None, thresholds: Iterable[int]) -> str:
+    """Mức giá theo ngưỡng CỦA PROFILE ([category].price_levels).
+
+    `thresholds` là hai trần dưới dạng VNĐ: <= trần đầu là "budget", <= trần sau
+    là "mid-range", còn lại "luxury". Bắt truyền tường minh để không có đường
+    nào lỡ áp thang giá bữa ăn cho một đêm khách sạn.
+    """
     if avg is None:
         return ""
-    for ceiling, label in PRICE_LEVELS:
+    for ceiling, label in zip(thresholds, PRICE_LEVEL_LABELS):
         if avg <= ceiling:
             return label
-    return ""
+    return PRICE_LEVEL_LABELS[-1]
 
 
 def single_price(gia: Any) -> str:
@@ -315,42 +307,22 @@ def degroup_thousands(text: Any) -> str:
     )
 
 
-# Gemini có một mẫu trích xuất thực đơn CỐ ĐỊNH tự kích hoạt cho tác vụ dạng
-# này — đã kiểm chứng lặp lại Y HỆT (name/description/price/category, "price"
-# là SỐ nguyên đầy đủ VNĐ) dù prompt yêu cầu rõ ràng đúng 3 khoá
-# loai_thuc_pham/ten/gia (xem FIELD_ALIASES trong models.py — cùng hiện tượng
-# với hồ sơ POI). Không phải lỗi ngẫu nhiên mà là template nội bộ không đổi
-# được bằng prompt, nên ánh xạ lại thay vì tiếp tục sửa câu chữ prompt.
-_MENU_NAME_ALIASES = ("ten", "name", "mon", "ten_mon", "item", "item_name")
-_MENU_CATEGORY_ALIASES = ("loai_thuc_pham", "category", "loai", "nhom", "section")
+def price_table_json(raw: str, normalize: Callable[[dict], dict]) -> str:
+    """Khối JSON bảng giá Gemini trả về -> chuỗi JSON đã chuẩn hoá.
 
+    Dùng chung cho THỰC ĐƠN (profile food) và BẢNG GIÁ PHÒNG (profile accom):
+    hai thứ khác nhau về tên khoá nhưng giống hệt nhau về cách Gemini gói ghém
+    câu trả lời — bọc trong ```json ... ``` kèm câu dẫn, nên phải cắt lấy đúng
+    mảng. `normalize` là phần khác nhau: mỗi profile tự ánh xạ tên khoá của mình.
 
-def _normalize_menu_item(item: dict) -> dict:
-    ten = next((item[k] for k in _MENU_NAME_ALIASES if item.get(k)), "")
-    loai = next((item[k] for k in _MENU_CATEGORY_ALIASES if item.get(k)), "")
+    Mỗi dòng chỉ giữ MỘT mức giá: "25 - 28" -> "25". Quy đổi số có dấu phẩy về
+    dạng nghìn TRƯỚC, nếu không "1,100,000" sẽ bị đọc thành "1".
 
-    gia = item.get("gia")
-    if not gia:
-        price = item.get("price")
-        if isinstance(price, (int, float)):
-            # Mẫu thay thế của Gemini ghi "price" là SỐ nguyên đầy đủ VNĐ
-            # (165000), không phải chuỗi theo đơn vị nghìn như "gia" — quy đổi
-            # để khớp quy ước dataset (menu_prices() luôn nhân 1000 khi đọc lại).
-            gia = str(round(price / 1000))
-        elif price:
-            gia = price
-        else:
-            gia = ""
-
-    return {"loai_thuc_pham": loai, "ten": ten, "gia": gia}
-
-
-def menu_json(record: POIRecord) -> str:
-    """Lấy khối JSON thực đơn Gemini trả về, chuẩn hoá lại cho gọn.
-
-    Gemini hay bọc JSON trong ```json ... ``` kèm câu dẫn — cắt lấy đúng mảng.
+    Indent 2 để dễ đọc/sửa tay khi mở ô này lên — ô sẽ trải nhiều dòng vật lý
+    trong row.tsv, nhưng vẫn là MỘT ô/MỘT bản ghi vì được bọc nháy kép theo
+    RFC4180 (csv.DictWriter tự làm việc này khi field chứa newline).
     """
-    raw = ((record.menu or {}).get("extracted") or {}).get("_raw") or ""
+    raw = raw or ""
     start, end = raw.find("["), raw.rfind("]")
     if start < 0 or end <= start:
         return ""
@@ -359,26 +331,23 @@ def menu_json(record: POIRecord) -> str:
     except json.JSONDecodeError:
         return raw[start : end + 1]
 
-    normalized = [_normalize_menu_item(i) for i in items if isinstance(i, dict)]
-    # Mỗi món chỉ giữ MỘT mức giá: "25 - 28" -> "25". Quy đổi số có dấu phẩy về
-    # dạng nghìn trước, nếu không "1,100,000" sẽ bị đọc thành "1".
+    normalized = [normalize(i) for i in items if isinstance(i, dict)]
     for item in normalized:
         item["gia"] = single_price(degroup_thousands(item["gia"]))
-    # Indent 2 để dễ đọc/sửa tay khi mở ô này lên — ô sẽ trải nhiều dòng vật lý
-    # trong row.tsv, nhưng vẫn là MỘT ô/MỘT bản ghi vì được bọc nháy kép theo
-    # RFC4180 (csv.DictWriter tự làm việc này khi field chứa newline).
     return json.dumps(normalized, ensure_ascii=False, indent=2)
 
 
-def menu_price_range(menu_text: str) -> tuple[int | None, int | None]:
-    """Giá thấp nhất / cao nhất trong thực đơn.
+def price_range(table_text: str) -> tuple[int | None, int | None]:
+    """Giá thấp nhất / cao nhất trong một bảng giá đã chuẩn hoá.
 
     Giá có thể là khoảng ('80-90') -> lấy cận dưới cho min, cận trên cho max.
+    Không phụ thuộc tên khoá phân loại, chỉ đọc "gia" — nên dùng được cho cả
+    thực đơn lẫn bảng giá phòng.
     """
-    if not menu_text:
+    if not table_text:
         return None, None
     try:
-        items = json.loads(menu_text)
+        items = json.loads(table_text)
     except json.JSONDecodeError:
         return None, None
 
@@ -394,12 +363,6 @@ def menu_price_range(menu_text: str) -> tuple[int | None, int | None]:
 
 
 # -- Suy luận các trường Gemini không cho -----------------------------------
-
-# Mục thực đơn hay chứa món đặc trưng của quán, theo thứ tự ưu tiên.
-SIGNATURE_MENU_SECTIONS = ["đặc biệt", "đặc sản", "món tủ", "signature", "best seller"]
-
-# Dấu hiệu quán có bán đồ uống có cồn.
-ALCOHOL_HINTS = ["bia", "rượu", "beer", "wine", "cocktail", "nhậu", "lẩu"]
 
 
 def name_without_diacritics(name: str) -> str:
@@ -434,31 +397,6 @@ def english_name(candidate: Any, vietnamese_name: str) -> str:
     return text
 
 
-def signature_dishes(menu_text: str, limit: int = 4) -> list[str]:
-    """Món nên thử: ưu tiên mục 'Đặc biệt', không có thì lấy các món đắt nhất."""
-    if not menu_text:
-        return []
-    try:
-        items = [i for i in json.loads(menu_text) if isinstance(i, dict) and i.get("ten")]
-    except json.JSONDecodeError:
-        return []
-
-    for section in SIGNATURE_MENU_SECTIONS:
-        picked = [i["ten"] for i in items if section in str(i.get("loai_thuc_pham", "")).lower()]
-        if picked:
-            return picked[:limit]
-
-    # Không có mục đặc biệt: món đắt nhất thường là món chủ lực.
-    ranked = sorted(items, key=lambda i: parse_menu_price(i.get("gia")) or 0, reverse=True)
-    return [i["ten"] for i in ranked[:limit]]
-
-
-def _category_cfg() -> dict[str, Any]:
-    from .config import settings
-
-    return settings().get("category", {})
-
-
 def _has_keyword(text: str, keyword: str) -> bool:
     """Khớp theo RANH GIỚI TỪ, không phải chuỗi con.
 
@@ -469,30 +407,37 @@ def _has_keyword(text: str, keyword: str) -> bool:
     return re.search(rf"\b{re.escape(_plain(keyword))}\b", _plain(text)) is not None
 
 
-def classify_l1(category_raw: str) -> tuple[str, bool]:
+def classify_l1(category_raw: str, cfg: dict[str, Any]) -> tuple[str, bool]:
     """Nhãn ngành Google -> (category_l1, có_chắc_chắn_không).
 
     CHỈ xét nhãn ngành của Google, KHÔNG xét tên quán: "Nhà hàng - Khách sạn
     Yasaka" có chữ "khách sạn" trong tên nhưng vẫn là chỗ ăn, lấy tên vào so
     khớp là tự tạo dương tính giả.
 
-    Fail-open có chủ ý: không đọc được nhãn -> ("FOOD", False). Chặn nhầm một
-    quán thật chỉ để lại dòng stub mà người gán nhãn khó nhận ra; ngược lại một
-    khách sạn lọt qua sẽ lộ ngay (không menu, dữ liệu vô nghĩa).
+    `cfg` là bảng [category] CỦA PROFILE. Chiều của cổng chặn do `cfg["mode"]`
+    quyết định:
+
+    - "blacklist" (FOOD): trúng một marker -> loại. Vốn từ nhãn ngành đồ ăn của
+      Google là MỞ, không liệt kê hết được, nên chỉ liệt kê được cái KHÔNG phải.
+    - "whitelist" (ACCOM): không trúng marker nào -> loại. Vốn từ lưu trú thì
+      ĐÓNG và nhỏ; ở đây blacklist mới là cái bất khả thi.
+
+    Fail-open có chủ ý ở CẢ HAI mode: không đọc được nhãn -> (l1_default, False).
+    Nhãn rỗng là lỗi selector chứ không phải tín hiệu phân loại, và chặn nhầm
+    một POI thật chỉ để lại dòng stub mà người gán nhãn khó nhận ra.
     """
-    cfg = _category_cfg()
-    food = cfg.get("l1_default", "FOOD")
+    default = cfg.get("l1_default", "FOOD")
     if not _plain(category_raw):
-        return food, False
-    for marker in cfg.get("non_food_markers", []):
-        # Ranh giới từ, không phải chuỗi con: "spa" nằm trong "spaghetti" —
-        # khớp chuỗi con sẽ biến quán mì Ý thành dòng stub trong im lặng.
-        if _has_keyword(category_raw, marker):
-            return "OTHER", True
-    return food, True
+        return default, False
+    # Ranh giới từ, không phải chuỗi con: "spa" nằm trong "spaghetti" — khớp
+    # chuỗi con sẽ biến quán mì Ý thành dòng stub trong im lặng.
+    hit = any(_has_keyword(category_raw, m) for m in cfg.get("markers", []))
+    if cfg.get("mode", "blacklist") == "whitelist":
+        return (default, True) if hit else ("OTHER", True)
+    return ("OTHER", True) if hit else (default, True)
 
 
-def normalize_l2(value: Any, category_raw: str = "", name: str = "") -> str:
+def normalize_l2(value: Any, category_raw: str, name: str, cfg: dict[str, Any]) -> str:
     """Chốt category_l2 về ĐÚNG một trong các nhãn hợp lệ ở [category].l2_values.
 
     Ưu tiên giá trị Gemini trả về, nhưng chỉ khi nó khớp một nhãn hợp lệ — so
@@ -502,8 +447,10 @@ def normalize_l2(value: Any, category_raw: str = "", name: str = "") -> str:
 
     Gemini không trả hoặc trả bậy thì suy từ nhãn ngành Google + tên quán qua
     [[category.l2_hints]]; cùng đường thì lấy l2_fallback.
+
+    `cfg` là bảng [category] CỦA PROFILE — bộ nhãn của FOOD và của ACCOM không
+    có giao nhau, nên truyền nhầm profile là mọi POI rơi hết về l2_fallback.
     """
-    cfg = _category_cfg()
     canonical = {_plain(v): v for v in cfg.get("l2_values", [])}
 
     # Thử cả chuỗi trước, rồi từng phần nếu Gemini trả kiểu "Quán ăn, Nhà hàng".
@@ -524,30 +471,63 @@ def normalize_l2(value: Any, category_raw: str = "", name: str = "") -> str:
     return cfg.get("l2_fallback", "")
 
 
-def derive_missing(profile: dict[str, Any], record: POIRecord) -> dict[str, Any]:
-    """Suy các trường còn thiếu từ dữ liệu đã có, thay vì để trống."""
-    out: dict[str, Any] = {}
-    name = (record.google_maps or {}).get("name") or record.poi_name
-    menu_text = menu_json(record)
+def _squash_sep(text: str) -> str:
+    """Bỏ dấu, gộp mọi ký tự không phải chữ/số thành MỘT khoảng trắng."""
+    return re.sub(r"[^a-z0-9]+", " ", _plain(text)).strip()
 
-    # KHÔNG suy name_en ở đây: chỉ nhận tên tiếng Anh thật, lọc ở english_name.
-    # category_l2 cũng không suy ở đây mà ở normalize_l2 — nó cần nhãn ngành
-    # Google (`category_raw`), thứ mà derive_missing không nhận vào.
 
-    if dishes := signature_dishes(menu_text):
-        out["must_try_dishes"] = dishes
+def normalize_vocab(value: Any, allowed: Iterable[str]) -> str:
+    """Lọc câu trả lời Gemini về ĐÚNG các nhãn hợp lệ, giữ thứ tự Gemini xếp.
 
-    # Có bia/rượu/lẩu trong thực đơn hoặc tag "quán nhậu" -> có phục vụ đồ uống có cồn.
-    haystack = (menu_text + " " + join_list(profile.get("tags"))).lower()
-    if any(hint in haystack for hint in ALCOHOL_HINTS):
-        out["alcohol_served"] = "có"
+    Dùng cho MỌI cột có bộ giá trị đóng do người gán nhãn chốt trước —
+    `matched_intents`, `tags`, `suitable_for`, `not_suitable_for`, `view_type`.
 
-    # Quán bình dân gần như không cần đặt bàn.
-    avg = parse_amount(profile.get("price_per_person_avg"))
-    if avg is not None:
-        out["reservation_required"] = "không" if avg <= 150_000 else "có"
+    KHÔNG dùng `as_list` được: nhãn hợp lệ có thể chứa dấu phẩy BÊN TRONG
+    ("Nghỉ dưỡng, thư giãn", "Ghé nhanh, tiện đường"), tách theo dấu phẩy là vỡ
+    chúng thành bốn mảnh và không mảnh nào khớp danh sách.
 
-    return out
+    Nên quét ngược lại: tìm từng nhãn hợp lệ TRONG chuỗi Gemini trả về (so khớp
+    bỏ dấu, không phân biệt hoa thường), nhãn DÀI xét trước để nhãn ngắn không
+    khớp trùng vào chỗ đã lấy, và xoá phần đã khớp khỏi chuỗi. Cách này miễn
+    nhiễm với mọi kiểu ngăn cách Gemini dùng — phẩy, chấm phẩy, gạch đầu dòng,
+    gạch chéo hay xuống dòng.
+
+    So khớp có RANH GIỚI TỪ. Bộ giá trị của `tags`/`view_type` có những nhãn rất
+    ngắn ("núi", "bbq", "gym", "biển"); khớp chuỗi con trần thì "nui" lọt vào
+    giữa một từ khác và cột nhận nhãn chưa bao giờ được nhắc tới — đúng cái bẫy
+    "pub" trong "gastropub" đã ghi ở schema._has_keyword.
+
+    Không nhãn nào khớp -> chuỗi RỖNG. Giá trị Gemini tự nghĩ không bao giờ ra
+    tới cột, nhưng vẫn còn nguyên trong data.json để rà lại.
+    """
+    allowed = list(allowed)
+    if not allowed:
+        return ""
+    raw = " ".join(str(v) for v in value) if isinstance(value, list) else str(value or "")
+    # Gộp mọi dấu câu thành khoảng trắng ở CẢ HAI phía: Gemini có thể trả
+    # "Nghỉ dưỡng, thư giãn" hay "Nghỉ dưỡng thư giãn", và bản ghi cũ đã bị
+    # parser tách mất dấu phẩy. Không chuẩn hoá thì hai dạng đó không khớp nhau.
+    haystack = _squash_sep(raw)
+    if not haystack:
+        return ""
+
+    hits: list[tuple[int, str]] = []
+    for label in sorted(allowed, key=lambda s: len(_squash_sep(s)), reverse=True):
+        needle = _squash_sep(label)
+        if not needle:
+            continue
+        m = re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", haystack)
+        if m:
+            hits.append((m.start(), label))
+            # Thay bằng khoảng trắng chứ không cắt bỏ: giữ nguyên độ dài để vị
+            # trí của các nhãn khớp sau vẫn so được với nhãn đã khớp trước.
+            haystack = haystack[: m.start()] + " " * len(needle) + haystack[m.end() :]
+    return ", ".join(label for _, label in sorted(hits))
+
+
+# Tên cũ, giữ lại vì `matched_intents` là chỗ đầu tiên dùng hàm này và cả
+# CLAUDE.md lẫn config đều trỏ tới tên đó.
+normalize_intents = normalize_vocab
 
 
 # -- Dựng dòng dữ liệu -----------------------------------------------------
@@ -591,7 +571,9 @@ def pick_video(record: POIRecord, tiktok_index: int = 0) -> dict[str, Any]:
     return {}
 
 
-def apply_overrides(row: dict[str, str], record: POIRecord) -> dict[str, str]:
+def apply_overrides(
+    row: dict[str, str], record: POIRecord, columns: Iterable[str]
+) -> dict[str, str]:
     """Áp phần sửa tay lên dòng vừa dựng. Gọi CUỐI CÙNG, ngay trước khi trả về.
 
     Đây là điều kiện để người gán nhãn dám sửa tay: sửa xong chạy lại `--only maps`
@@ -599,87 +581,66 @@ def apply_overrides(row: dict[str, str], record: POIRecord) -> dict[str, str]:
     trong data.json chứ không nằm trong row.tsv, xuất lại bao nhiêu lần cũng ra
     cùng kết quả.
 
-    Chỉ nhận khoá thuộc COLUMNS — khoá lạ (đổi tên cột, gõ sai) bị bỏ qua chứ
-    không lặng lẽ đẻ thêm cột thứ 74 làm lệch cả file TSV.
+    Chỉ nhận khoá thuộc `columns` của ĐÚNG profile bản ghi — khoá lạ (đổi tên
+    cột, gõ sai, hoặc override còn sót từ profile khác) bị bỏ qua chứ không lặng
+    lẽ đẻ thêm một cột nữa làm lệch cả file TSV.
     """
+    allowed = frozenset(columns)
     overrides = getattr(record, "overrides", None) or {}
     for col, value in overrides.items():
-        if col in _COLUMN_SET:
+        if col in allowed:
             row[col] = "" if value is None else str(value)
     return row
 
 
-def build_row(
-    record: POIRecord,
-    defaults: dict[str, Any],
-    tiktok_index: int = 0,
-    ward_map: dict[str, str] | None = None,
-) -> dict[str, str]:
-    """Ánh xạ một POIRecord sang đúng 73 cột của dataset."""
-    maps_raw = record.google_maps or {}
+def resolved_address(maps: dict[str, Any], ward_map: dict[str, str]) -> dict[str, str]:
+    """Địa chỉ + phường/tỉnh/vùng đã chuẩn hoá. Dùng chung cho mọi profile.
 
-    # POI không thuộc nhóm đồ ăn: dòng stub CHỈ có `name` + `category_l1`, mọi
-    # cột khác để trống (kể cả status/labeled_by/last_updated). Dataset vẫn có
-    # một dòng để biết POI này đã được kiểm tra và loại, thay vì im lặng biến
-    # mất. Đọc `record.category_l1` trước, lùi về defaults cho data.json cũ
-    # chưa có khoá này -> không POI cũ nào bỗng dưng thành stub.
-    l1 = getattr(record, "category_l1", "") or defaults.get("category_l1", "FOOD")
-    if l1 != "FOOD":
-        stub = {col: "" for col in COLUMNS}
-        stub["category_l1"] = l1
-        stub["name"] = maps_raw.get("name") or record.poi_name
-        # Áp override cả ở đây: người rà lại có thể muốn sửa ngay trên dòng stub
-        # (vd đổi `category_l1` sau khi xác nhận Google xếp ngành nhầm).
-        return apply_overrides(stub, record)
-
-    # Suy các trường Gemini không cho. Làm ở đây (không phải lúc chạy bước
-    # gemini1) vì must_try_dishes cần thực đơn — chỉ có sau khi bước `menu` xong.
-    profile = dict(record.gemini_profile or {})
-    for key, value in derive_missing(profile, record).items():
-        if not profile.get(key):
-            profile[key] = value
-
-    maps = maps_raw
-    photos = maps.get("photos") or {}
-    reviews = maps.get("reviews") or {}
-    hours = (maps.get("hours") or {}).get("by_day") or {}
-
-    ward_map = ward_map or {}
-    picked = pick_video(record, tiktok_index)
-
+    Trả về {"address", "ward", "city", "region"}. Phường sau sáp nhập: Google
+    trả tên CŨ nên phải tra bảng khai báo tay; nếu tên mới chưa có trong địa chỉ
+    thì ghép lại, giữ nguyên số nhà + tên đường.
+    """
     raw_address = maps.get("address") or ""
     location = split_address(raw_address)
-    # Phường sau sáp nhập: Google trả tên cũ -> tra bảng khai báo tay.
-    location["ward"] = merged_ward(raw_address, location["ward"], ward_map)
+    location["ward"] = merged_ward(raw_address, location["ward"], ward_map or {})
     address = clean_address(raw_address)
     if location["ward"] and location["ward"] not in address:
-        # Ghép lại địa chỉ với tên phường mới, giữ nguyên số nhà + tên đường.
         street = address.split(",")[0].strip()
         address = ", ".join(p for p in [street, location["ward"], location["city"]] if p)
+    return {**location, "address": address}
 
-    # Giờ mở/đóng: lấy khung phổ biến nhất trong tuần.
+
+def modal_hours(maps: dict[str, Any]) -> tuple[str, str]:
+    """Giờ mở/đóng: lấy khung phổ biến nhất trong tuần."""
+    hours = (maps.get("hours") or {}).get("by_day") or {}
     opens = [d.get("open") for d in hours.values() if d.get("open")]
     closes = [d.get("close") for d in hours.values() if d.get("close")]
-    open_time = max(set(opens), key=opens.count) if opens else ""
-    close_time = max(set(closes), key=closes.count) if closes else ""
+    return (
+        max(set(opens), key=opens.count) if opens else "",
+        max(set(closes), key=closes.count) if closes else "",
+    )
 
-    menu_text = menu_json(record)
-    price_min, price_max = menu_price_range(menu_text)
-    avg = parse_amount(profile.get("price_per_person_avg"))
 
+def _photo_base(url: str) -> str:
+    return url.split("=")[0]
+
+
+def cover_and_gallery(maps: dict[str, Any]) -> tuple[str, list[str]]:
+    """(ảnh đại diện, tối đa GALLERY_URLS_COUNT ảnh phụ). Dùng chung mọi profile.
+
+    Chốt bất biến ở tầng xuất: raw_gallery_urls không được trùng nhau, cũng
+    không được trùng raw_cover_image_url — kể cả khi data.json cũ (scrape từ
+    trước khi gmaps.photos() vá lỗi so trùng theo kích thước ảnh) vẫn còn dữ
+    liệu trùng lặp bên trong.
+
+    Nguồn mặc định là bể ứng viên thật lấy từ mục "Tất cả"; chỉ lùi về
+    `secondary` cho data.json CŨ chưa có bể đó. `secondary` (img.DaSXdd) thực
+    chất là ảnh bìa của từng MỤC ảnh chứ không phải ảnh phụ của quán, nên nó chỉ
+    là phương án chót. Người gán nhãn tick 3 ảnh ở tab "Ảnh" thì lựa chọn đó nằm
+    trong `overrides` và được áp CUỐI CÙNG, đè lên mặc định này.
+    """
+    photos = maps.get("photos") or {}
     hero = photos.get("hero") or ""
-    # Chốt bất biến ở tầng xuất: raw_gallery_urls không được trùng nhau, cũng
-    # không được trùng raw_cover_image_url — kể cả khi data.json cũ (scrape từ
-    # trước khi gmaps.photos() vá lỗi so trùng theo kích thước ảnh) vẫn còn dữ
-    # liệu trùng lặp bên trong.
-    def _photo_base(url: str) -> str:
-        return url.split("=")[0]
-
-    # Nguồn ảnh gallery mặc định là bể ứng viên thật lấy từ mục "Tất cả"; chỉ lùi
-    # về `secondary` cho data.json CŨ chưa có bể đó. `secondary` (img.DaSXdd)
-    # thực chất là ảnh bìa của từng MỤC ảnh chứ không phải ảnh phụ của quán, nên
-    # nó chỉ là phương án chót. Người gán nhãn tick 3 ảnh ở tab "Ảnh" thì lựa
-    # chọn đó nằm trong `overrides` và được áp CUỐI CÙNG, đè lên mặc định này.
     candidates = (maps.get("gallery_candidates") or {}).get("images") or []
     seen_bases = {_photo_base(hero)} if hero else set()
     gallery: list[str] = []
@@ -689,100 +650,46 @@ def build_row(
             continue
         seen_bases.add(base)
         gallery.append(url)
-    gallery = gallery[:GALLERY_URLS_COUNT]
+    return hero, gallery[:GALLERY_URLS_COUNT]
 
-    row = {
-        "poi_id": "",
-        "category_l1": l1,
-        "name": maps.get("name") or record.poi_name,
-        "name_en": english_name(profile.get("name_en"), maps.get("name") or record.poi_name),
-        # Bước `maps`/`gemini1` đã chốt sẵn vào record; chạy lại normalize_l2 ở
-        # đây để `vsf export` trên data.json CŨ (chưa có khoá này) vẫn ra nhãn
-        # đúng chuẩn thay vì cột rỗng.
-        "category_l2": getattr(record, "category_l2", "")
-        or normalize_l2(
-            profile.get("category_l2"),
-            maps.get("category_raw", ""),
-            maps.get("name") or record.poi_name,
-        ),
-        "tags": join_list(profile.get("tags")),
-        "cuisine_type": join_list(profile.get("cuisine_type")),
-        "must_try_dishes": join_list(profile.get("must_try_dishes")),
-        "menu": menu_text,
-        "price_per_person_avg": money(avg),
-        # Để trống — Gemini chỉ đoán được số chỗ ngồi, không tra được.
-        "seating_capacity": "",
-        "dietary_options": profile.get("dietary_options") or "",
-        "reservation_required": boolean(profile.get("reservation_required")),
-        "dress_code": (profile.get("dress_code") or "").capitalize(),
-        "alcohol_served": boolean(profile.get("alcohol_served")),
-        "view_type": profile.get("view_type") or "",
-        "lat": str(maps.get("lat") or ""),
-        "long": str(maps.get("long") or ""),
-        # Địa chỉ Google trả về nguyên trạng — không mất gì khi đổi tên phường.
-        # Địa chỉ trước sáp nhập 1/7/2025 — do Gemini trả lời ở bước old_address.
-        "old_address": clean_address(maps.get("old_address")),
-        "address": address,
-        "ward": location["ward"],
-        "city": location["city"],
-        "region": location["region"],
-        "place_id": maps.get("place_id") or "",
-        "distance_from_reference_km": "",
-        "reference_point": "",
-        "open_time": open_time,
-        "close_time": close_time,
-        # Excel hiểu ="..." là công thức trả về chuỗi văn bản thuần — ép cột
-        # thành text nên không mất số 0 đầu, và không giống dấu nháy đơn, cách
-        # này không phụ thuộc mở file hay dán trực tiếp vào Excel.
-        "phone": f'="{maps["phone"]}"' if maps.get("phone") else "",
-        "contact": "",
-        "operating_note": profile.get("operating_note") or "",
-        "price_min": money(price_min),
-        "price_max": money(price_max),
-        "price_level": price_level_for(avg),
-        "booking_required": boolean(profile.get("reservation_required")),
-        "booking_source": defaults.get("booking_source", "internal"),
-        "rating_score": str(maps.get("rating") or ""),
-        "review_count": str(maps.get("review_count") or ""),
-        "rating_source": defaults.get("rating_source", "Google Maps"),
-        "cover_image_url": "",
-        "gallery_urls": "",
-        "positive_comments": quoted_comments(reviews.get("positive") or []),
-        "negative_comments": quoted_comments(reviews.get("negative") or []),
-        "description_short": profile.get("description_short") or "",
-        "description_long": profile.get("description_long") or "",
-        "best_time_to_visit": profile.get("best_time_to_visit") or "",
-        "estimated_duration": profile.get("estimated_duration") or "",
-        "suitable_for": profile.get("suitable_for") or "",
-        "not_suitable_for": profile.get("not_suitable_for") or "",
-        "insider_tips": profile.get("insider_tips") or "",
-        "source_url": "",
-        "video_posted_date": (picked.get("posted_at") or "")[:10],
-        "verified_date": "",
-        # Luôn lấy giá trị mặc định trong settings, KHÔNG dùng mức Gemini tự chấm:
-        # nó chấm theo độ chắc chắn của chính nó, không phải độ tin cậy của dòng
-        # dữ liệu. Người gán nhãn hạ xuống khi rà lại.
-        "confidence_level": defaults.get("confidence_level", ""),
-        "info_expiry_note": profile.get("info_expiry_note") or defaults.get("info_expiry_note", ""),
-        "nearby_poi_ids": "",
-        "complementary_poi_ids": "",
-        "alternative_poi_ids": "",
-        "weather_dependency": profile.get("weather_dependency") or "",
-        "crowd_level_note": profile.get("crowd_level_note") or "",
-        "matched_intents": join_list(profile.get("matched_intents")),
-        "search_keywords": join_list(profile.get("search_keywords")),
-        "nearby_hotel_ids": "",
-        "status": defaults.get("status", "active"),
-        "labeled_by": defaults.get("labeled_by", ""),
-        "review_status": defaults.get("review_status", "draft"),
-        "reviewer_note": "",
-        "last_updated": date.today().isoformat(),
-        "by_pass": "FALSE",
-        "dest": slug_dest(location["city"], address),
-        # raw_* giữ nguyên dữ liệu thô; cover_image_url/gallery_urls để trống cho
-        # khâu xử lý ảnh phía sau điền vào, đúng như dòng mẫu.
-        "raw_url": picked.get("url") or "",
-        "raw_cover_image_url": hero,
-        "raw_gallery_urls": ", ".join(gallery),
-    }
-    return apply_overrides({col: row.get(col, "") for col in COLUMNS}, record)
+
+def stub_row(record: POIRecord, l1: str, columns: Iterable[str]) -> dict[str, str]:
+    """Dòng stub CHỈ có `name` + `category_l1`, mọi cột khác để trống.
+
+    Dùng cho POI không thuộc nhóm ngành của profile (kể cả status/labeled_by/
+    last_updated cũng để trống). Dataset vẫn có một dòng để biết POI này đã được
+    kiểm tra và loại, thay vì im lặng biến mất.
+    """
+    columns = list(columns)
+    stub = {col: "" for col in columns}
+    stub["category_l1"] = l1
+    stub["name"] = (record.google_maps or {}).get("name") or record.poi_name
+    # Áp override cả ở đây: người rà lại có thể muốn sửa ngay trên dòng stub
+    # (vd đổi `category_l1` sau khi xác nhận Google xếp ngành nhầm).
+    return apply_overrides(stub, record, columns)
+
+
+def build_row(
+    record: POIRecord,
+    defaults: dict[str, Any] | None = None,
+    tiktok_index: int = 0,
+    ward_map: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Ánh xạ một POIRecord sang đúng bộ cột của PROFILE CỦA CHÍNH NÓ.
+
+    Chỉ là bộ điều phối — dòng dữ liệu thật do `profiles.<name>.build_row` dựng.
+    Giữ nguyên chữ ký cũ để `pipeline.export_row` và `server.api` không phải đổi.
+
+    `defaults`/`ward_map` bỏ trống thì tự tra từ profile của bản ghi. Truyền tay
+    vẫn được (test dùng), nhưng nhớ là truyền `[dataset]` của profile KHÁC thì
+    `category_l1` lệch và cả dòng thành stub.
+    """
+    from .profiles import get_profile
+
+    profile = get_profile(getattr(record, "profile", "") or "food")
+    cfg = profile.settings()
+    if defaults is None:
+        defaults = cfg["dataset"]
+    if ward_map is None:
+        ward_map = cfg.get("ward_map", {})
+    return profile.build_row(record, defaults, tiktok_index, ward_map)

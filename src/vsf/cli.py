@@ -22,7 +22,7 @@ console = Console()
 def run(
     poi: str = typer.Argument(..., help="Tên POI, ví dụ: 'Bánh Canh Trần Văn Ơn'"),
     only: str = typer.Option(
-        None, "--only", help=f"Chỉ chạy một bước: {' | '.join(pipeline.STEPS)}"
+        None, "--only", help=f"Chỉ chạy một bước: {' | '.join(pipeline.all_steps())}"
     ),
     resume: bool = typer.Option(
         False, "--resume", help="Bỏ qua các bước đã chạy thành công lần trước"
@@ -44,31 +44,55 @@ def run(
     ),
     force_food: bool = typer.Option(
         False,
+        # Hai tên cho CÙNG một cờ: `--force-food` là tên cũ, giữ lại để lệnh đã
+        # ghi trong ghi chú/script cũ vẫn chạy; `--force-category` là tên đúng
+        # từ khi có profile lưu trú.
+        "--force-category",
         "--force-food",
         help=(
-            "Bỏ qua cổng phân loại FOOD. Dùng khi nhãn ngành của Google gây hiểu "
-            "nhầm (vd quán ăn trong khách sạn bị xếp ngành 'Khách sạn'). Chỉ có "
-            "hiệu lực cho lần chạy này, không ghi vào data.json."
+            "Bỏ qua cổng phân loại nhóm ngành. Dùng khi nhãn ngành của Google gây "
+            "hiểu nhầm (vd quán ăn trong khách sạn bị xếp ngành 'Khách sạn', hay "
+            "homestay bị xếp ngành 'Công ty du lịch'). Chỉ có hiệu lực cho lần "
+            "chạy này, không ghi vào data.json."
         ),
+    ),
+    profile: str = typer.Option(
+        "food",
+        "--profile",
+        help="Bộ dataset: food (POI đồ ăn, 73 cột) | accom (POI lưu trú, 72 cột)",
     ),
 ) -> None:
     """Thu thập dữ liệu cho một POI và ghi ra output/<slug>/data.json."""
     from .config import set_output_dir
+    from .profiles import PROFILES
 
     set_output_dir(out)
 
-    if only and only not in pipeline.STEPS:
-        console.print(f"[red]--only phải là một trong: {', '.join(pipeline.STEPS)}[/]")
+    if profile not in PROFILES:
+        console.print(f"[red]--profile phải là một trong: {', '.join(PROFILES)}[/]")
+        raise typer.Exit(2)
+
+    steps = PROFILES[profile].STEPS
+    if only and only not in steps:
+        console.print(
+            f"[red]--only phải là một trong: {', '.join(steps)} (profile {profile})[/]"
+        )
         raise typer.Exit(2)
 
     record = pipeline.run(
-        poi, only=only, resume=resume, index=index, address=address, force_food=force_food
+        poi,
+        only=only,
+        resume=resume,
+        index=index,
+        address=address,
+        force_food=force_food,
+        profile=profile,
     )
 
     table = Table(title=f"Kết quả: {poi}")
     table.add_column("Bước")
     table.add_column("Trạng thái")
-    for step in pipeline.STEPS:
+    for step in steps:
         status = record.steps.get(step, "chưa chạy")
         mark = {"ok": "[green]✓ ok[/]", "failed": "[red]✗ lỗi[/]"}.get(status, f"[dim]{status}[/]")
         table.add_row(step, mark)
@@ -79,7 +103,7 @@ def run(
         # markup và nuốt mất nếu không thoát.
         console.print("[yellow]![/] " + escape(warning))
 
-    if any(record.steps.get(s) == "failed" for s in pipeline.STEPS):
+    if any(record.steps.get(s) == "failed" for s in steps):
         raise typer.Exit(1)
 
 
@@ -170,9 +194,13 @@ def photos(
     for folder in folders:
         record = POIRecord.load_folder(folder)
         maps = record.google_maps or {}
-        # Stub non-FOOD không có cột ảnh nào để vá — bỏ qua, đừng đốt một lượt mở
-        # trang chỉ để ghi lại đúng dòng stub cũ.
-        if record.category_l1 and record.category_l1 != "FOOD":
+        # Dòng stub (POI sai nhóm ngành) không có cột ảnh nào để vá — bỏ qua,
+        # đừng đốt một lượt mở trang chỉ để ghi lại đúng dòng stub cũ.
+        # So với nhóm ngành CỦA PROFILE bản ghi: so cứng với "FOOD" thì mọi POI
+        # lưu trú (category_l1 = "ACCOM") bị bỏ qua sạch trong im lặng.
+        from .profiles import profile_for
+
+        if record.category_l1 and record.category_l1 != profile_for(record).category_l1:
             continue
         needs = not (maps.get("photos") or {}).get("hero") or not (
             (maps.get("gallery_candidates") or {}).get("images")
@@ -223,7 +251,11 @@ def login() -> None:
         console.print("[green]Đã mở Chrome[/] với profile riêng của tool.")
 
     with browser.Session() as s:
-        s.goto("gemini_profile", settings()["gemini"]["profile_chat_url"])
+        # Mở MỌI thread Gemini đang khai báo, không chỉ chat #1 của profile mặc
+        # định: mỗi profile có thể có cặp thread riêng, và thread nào chưa từng
+        # mở trong profile Chrome này thì lần chạy thật mới phát hiện là hỏng.
+        for slot, url in browser.gemini_slots().items():
+            s.goto(slot, url)
         s.goto("tiktok", "https://www.tiktok.com/")
         s.goto("facebook", "https://www.facebook.com/")
 
@@ -239,7 +271,7 @@ def login() -> None:
 
 @app.command()
 def doctor() -> None:
-    """Kiểm tra môi trường: profile, đăng nhập, 2 chat Gemini có truy cập được không."""
+    """Kiểm tra môi trường: profile, đăng nhập, mọi chat Gemini có truy cập được không."""
     from . import health
 
     checks = health.check_all()
@@ -301,9 +333,19 @@ def batch_add(
     source: str = typer.Argument(..., help="File danh sách POI (.csv/.tsv/.txt)"),
     out: str = typer.Option(..., "--out", help="Thư mục kết quả của đợt, vd output_19_8"),
     name: str = typer.Option("", "--name", help="Tên đợt hiển thị trong giao diện"),
+    profile: str = typer.Option(
+        "food",
+        "--profile",
+        help="Bộ dataset của cả đợt: food (73 cột) | accom (72 cột)",
+    ),
 ) -> None:
     """Nạp danh sách POI vào hàng đợi của một đợt."""
     from .batch import ingest, store
+    from .profiles import PROFILES
+
+    if profile not in PROFILES:
+        console.print(f"[red]--profile phải là một trong: {', '.join(PROFILES)}[/]")
+        raise typer.Exit(2)
 
     path = Path(source)
     if not path.is_file():
@@ -316,7 +358,7 @@ def batch_add(
         raise typer.Exit(1)
 
     store.init()
-    batch_id = store.get_or_create_batch(out, name or out)
+    batch_id = store.get_or_create_batch(out, name or out, profile=profile)
     for poi in pois:
         store.upsert_job(
             batch_id,
@@ -326,10 +368,12 @@ def batch_add(
             place_id=poi.place_id,
             force_food=poi.force_food,
             only_step=poi.only_step,
+            # Dòng nào khai profile riêng thì thắng; còn lại theo cả đợt.
+            profile=poi.profile or profile,
         )
 
     console.print(
-        f"[green]Đã nạp {len(pois)} POI[/] vào lô [bold]#{batch_id}[/] ({out}).\n"
+        f"[green]Đã nạp {len(pois)} POI[/] ({profile}) vào lô [bold]#{batch_id}[/] ({out}).\n"
         f"[dim]Chạy: vsf batch run --batch {batch_id}[/]"
     )
 
@@ -446,7 +490,7 @@ def batch_export(
     """Gộp row.tsv của cả đợt thành một file TSV duy nhất."""
     from .batch import export as batch_exporter
     from .batch import store
-    from .schema import COLUMNS
+    from .profiles import get_profile
 
     batch_id = _resolve_batch(batch, out)
     info = store.get_batch(batch_id)
@@ -456,12 +500,19 @@ def batch_export(
     except FileNotFoundError as exc:
         console.print(f"[red]{exc}[/]")
         raise typer.Exit(1)
+    except ValueError as exc:  # thư mục trộn hai profile
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1)
 
     if not result.rows:
         console.print("[red]Không gom được dòng nào.[/]")
         raise typer.Exit(1)
 
-    console.print(f"Đã ghi [bold]{result.path}[/] ({len(result.rows)} dòng, {len(COLUMNS)} cột)")
+    n_cols = len(get_profile(result.profile).COLUMNS)
+    console.print(
+        f"Đã ghi [bold]{result.path}[/] "
+        f"({len(result.rows)} dòng, {n_cols} cột, profile {result.profile})"
+    )
     console.print(
         f"  có raw_url: {result.with_url} | để trống: {len(result.rows) - result.with_url}"
     )

@@ -1,5 +1,7 @@
 """Test việc nhận lại tab cũ — không cần chạy Chrome thật."""
 
+import re
+
 from vsf.browser import Session, slot_url_prefixes
 
 
@@ -112,3 +114,107 @@ def test_close_stray_tabs_never_closes_the_last_tab():
     s._adopt_existing_tabs()
     s.close_stray_tabs()
     assert len(s._context.pages) == 1
+
+
+# -- Thread Gemini riêng cho từng profile -----------------------------------
+
+
+def _reload_config():
+    """Xoá cache lru_cache của config sau khi ghi đè file TOML trong test."""
+    from vsf import config
+
+    config.settings.cache_clear()
+    config.profile_settings.cache_clear()
+
+
+def _accom_config(tmp_path, monkeypatch, profile_url: str | None, menu_url: str | None):
+    """Bản sao config với thread accom được đặt lại (hoặc gỡ hẳn).
+
+    Ghi ĐÈ khoá đã có chứ không chèn thêm dòng — TOML cấm khai một khoá hai lần,
+    và profile accom giờ đã khai sẵn cặp thread riêng trong config thật.
+    `None` = gỡ khoá đi, để mô phỏng profile chưa có thread riêng.
+    """
+    import shutil
+
+    from vsf import config
+
+    dst = tmp_path / "config"
+    shutil.copytree(config.CONFIG_DIR, dst)
+    f = dst / "profile_accom.toml"
+    text = f.read_text(encoding="utf-8")
+    for key, value in (("profile_chat_url", profile_url), ("menu_chat_url", menu_url)):
+        pattern = rf'^{key} = ".*"$'
+        repl = "" if value is None else f'{key} = "{value}"'
+        text, n = re.subn(pattern, repl, text, count=1, flags=re.M)
+        assert n == 1, f"không thấy khoá {key} để thay trong profile_accom.toml"
+    f.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(config, "CONFIG_DIR", dst)
+    _reload_config()
+
+
+def test_each_profile_gets_its_own_gemini_slot(tmp_path, monkeypatch):
+    """Hai thread khác nhau KHÔNG được dùng chung một tab.
+
+    Dùng chung thì `open_chat` thấy tab đã ở đúng tiền tố "gemini.google.com"
+    rồi bỏ qua điều hướng, và prompt bay sang nhầm thread.
+    """
+    from vsf import browser
+
+    a = "https://gemini.google.com/app/aaaa1111"
+    b = "https://gemini.google.com/app/bbbb2222"
+    try:
+        _accom_config(tmp_path, monkeypatch, f"{a}?hl=vi", f"{b}?hl=vi")
+        slots = browser.gemini_slots()
+        assert len(slots) == 4
+        assert slots["gemini_profile:accom"] == a
+        assert slots["gemini_menu:accom"] == b
+        # Profile mặc định giữ tên slot TRẦN -> tab đang mở vẫn được nhận lại.
+        assert "gemini_profile" in slots and "gemini_menu" in slots
+        assert browser.gemini_slot("profile", "accom") == "gemini_profile:accom"
+        assert browser.gemini_slot("profile", "food") == "gemini_profile"
+    finally:
+        _reload_config()
+
+
+def test_four_gemini_tabs_are_adopted_without_stealing_each_other(tmp_path, monkeypatch):
+    from vsf import browser
+
+    a = "https://gemini.google.com/app/aaaa1111"
+    b = "https://gemini.google.com/app/bbbb2222"
+    try:
+        _accom_config(tmp_path, monkeypatch, f"{a}?hl=vi", f"{b}?hl=vi")
+        s = _session([PROFILE, MENU, a, b])
+        s._adopt_existing_tabs()
+        assert s._slots["gemini_profile"].url == PROFILE
+        assert s._slots["gemini_menu"].url == MENU
+        assert s._slots["gemini_profile:accom"].url == a
+        assert s._slots["gemini_menu:accom"].url == b
+    finally:
+        _reload_config()
+
+
+def test_profile_without_its_own_thread_shares_the_default_slot(tmp_path, monkeypatch):
+    """Profile chưa khai thread riêng -> dùng CHUNG slot mặc định.
+
+    Không được đẻ ra slot thứ hai trỏ đúng một URL: `close_stray_tabs` sẽ thấy
+    hai slot cùng tiền tố và đóng nhầm tab của slot kia.
+    """
+    from vsf import browser
+
+    try:
+        _accom_config(tmp_path, monkeypatch, None, None)
+        slots = browser.gemini_slots()
+        assert len(slots) == 2
+        assert browser.gemini_slot("profile", "accom") == "gemini_profile"
+        assert browser.gemini_slot("menu", "accom") == "gemini_menu"
+    finally:
+        _reload_config()
+
+
+def test_real_config_gives_accom_its_own_threads():
+    """Chốt hiện trạng: bốn thread khác nhau, bốn slot khác nhau."""
+    from vsf import browser
+
+    slots = browser.gemini_slots()
+    assert len(slots) == 4
+    assert len(set(slots.values())) == 4, "hai profile đang trỏ trùng thread"

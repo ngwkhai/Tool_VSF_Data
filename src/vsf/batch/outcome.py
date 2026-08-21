@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from ..errors import TERMINAL_FLAGS
 from ..models import POIRecord
-from ..pipeline import STEPS
+from ..profiles import steps_for
 
 
 def derive_status(record: POIRecord) -> tuple[str, str | None, str | None]:
@@ -35,7 +35,10 @@ def derive_status(record: POIRecord) -> tuple[str, str | None, str | None]:
             )
             return "needs_review", code, message
 
-    failed = [s for s in STEPS if record.steps.get(s) == "failed"]
+    # Duyệt CHÍNH `record.steps` chứ không phải danh sách bước của profile: một
+    # bước hỏng nhưng không nằm trong STEPS hiện tại (đổi profile, đổi tên bước)
+    # vẫn phải lộ ra là `failed`, không được biến mất thành `done`.
+    failed = [s for s, v in record.steps.items() if v == "failed"]
     if failed:
         info = step_runs.get(failed[0]) or {}
         return (
@@ -66,5 +69,8 @@ def missing_steps(record: POIRecord) -> list[str]:
 
     Gần như luôn là `facebook` với dữ liệu cũ. UI dùng để mời chạy bù đúng bước
     còn thiếu (`--only facebook`) thay vì cào lại từ đầu.
+
+    Xét theo danh sách bước CỦA PROFILE bản ghi: POI lưu trú không có bước `menu`
+    và không bao giờ nên bị báo là thiếu nó.
     """
-    return [s for s in STEPS if s not in record.steps]
+    return [s for s in steps_for(record) if s not in record.steps]

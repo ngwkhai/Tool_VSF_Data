@@ -104,6 +104,19 @@ tab_menu = "button[role='tab'][aria-label*='Thực đơn']"
 sort_button = "button.HQzyZ"
 # Menu sắp xếp: data-index 0=Phù hợp nhất 1=Mới nhất 2=Xếp hạng cao nhất 3=Xếp hạng thấp nhất
 sort_option = "div[role='menuitemradio']"
+# [2026-08-20] Trang KHÁCH SẠN có HAI nút `button.HQzyZ`: nút ĐẦU lọc NGUỒN đánh
+# giá ("Tất cả bài đánh giá" / Google / Tripadvisor — menu chỉ 3 mục), nút SAU
+# mới là sắp xếp. Trang quán ăn chỉ có một. Lấy `.first` như trước thì mở nhầm
+# menu nguồn rồi chờ mục thứ 4 không bao giờ có -> Timeout, và cả bước `maps`
+# hỏng theo (đã gặp ở "Lucky Sun Hotel").
+#
+# Chọn theo NHÃN chứ không theo vị trí: `nth(1)` chính là kiểu đoán bừa đã làm
+# hỏng `_open_reviews_tab` trước đây, và trang không có nút lọc nguồn thì lệch
+# ngay. Nút sắp xếp luôn mang nhãn của lựa chọn đang áp dụng, tức là một trong
+# bốn giá trị dưới đây (so khớp bỏ dấu, không phân biệt hoa thường).
+sort_option_labels = [
+  "Phù hợp nhất", "Mới nhất", "Xếp hạng cao nhất", "Xếp hạng thấp nhất",
+]
 
 review_card = "div.jftiEf"
 review_author = ".d4r55"

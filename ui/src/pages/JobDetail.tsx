@@ -16,13 +16,17 @@ import type { JobDetail as Detail, StepRun, TikTokCandidate } from "../types";
 
 type Tab = "steps" | "row" | "photos" | "tiktok" | "raw";
 
-const TABS: { key: Tab; label: string }[] = [
-  { key: "steps", label: "Các bước" },
-  { key: "row", label: "73 cột" },
-  { key: "photos", label: "Ảnh" },
-  { key: "tiktok", label: "TikTok" },
-  { key: "raw", label: "JSON gốc" },
-];
+/* Số cột tuỳ profile (73 với đồ ăn, 72 với lưu trú) nên nhãn tab phải đọc từ
+   `detail.columns` chứ không chép cứng. */
+function tabsFor(detail: Detail): { key: Tab; label: string }[] {
+  return [
+    { key: "steps", label: "Các bước" },
+    { key: "row", label: `${detail.columns.length} cột` },
+    { key: "photos", label: "Ảnh" },
+    { key: "tiktok", label: "TikTok" },
+    { key: "raw", label: "JSON gốc" },
+  ];
+}
 
 export function JobDetail() {
   const { id } = useParams();
@@ -56,6 +60,14 @@ export function JobDetail() {
             </Link>
             <span>/</span>
             <span className="font-mono">{record.slug}</span>
+            {/* Bộ dataset quyết định bộ cột và danh sách bước — phải nhìn thấy
+                ngay, nếu không một dòng 72 cột trông y hệt một dòng 73 cột thiếu. */}
+            <span
+              className="px-1.5 py-0.5 rounded border border-line bg-panel font-mono"
+              title={`${data.columns.length} cột · ${data.steps.length} bước`}
+            >
+              {data.profile}
+            </span>
             {record.place_id_hint && (
               <span
                 className="px-1.5 py-0.5 rounded border border-good/40 bg-good/10 text-good-lit"
@@ -89,7 +101,7 @@ export function JobDetail() {
       )}
 
       <div className="flex gap-1 border-b border-line">
-        {TABS.map((t) => (
+        {tabsFor(data).map((t) => (
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
@@ -154,7 +166,7 @@ function RerunControls({
           className="h-9 px-2.5 rounded-md border border-line bg-canvas text-ink text-[13.5px]
             transition-colors focus:border-brand"
         >
-          <option value="">Cả 6 bước</option>
+          <option value="">Cả {steps.length} bước</option>
           {steps.map((s) => (
             <option key={s} value={s}>
               Chỉ {s}
@@ -253,7 +265,7 @@ function StepsTab({ detail }: { detail: Detail }) {
   );
 }
 
-/* ------------------------------------------------------------- 73 cột ----- */
+/* --------------------------------------------------------- Cột dữ liệu ---- */
 
 function RowTab({ detail, onSaved }: { detail: Detail; onSaved: () => void }) {
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -292,7 +304,7 @@ function RowTab({ detail, onSaved }: { detail: Detail; onSaved: () => void }) {
 
   return (
     <Panel
-      title={`73 cột — ${Object.keys(overrides).length} ô đã sửa tay`}
+      title={`${detail.columns.length} cột — ${Object.keys(overrides).length} ô đã sửa tay`}
       right={
         <div className="flex items-center gap-2.5">
           {note && <span className="text-[13px] text-ink-dim anim-fade">{note}</span>}
@@ -695,6 +707,7 @@ function RawTab({ detail }: { detail: Detail }) {
     ["google_maps", detail.record.google_maps],
     ["gemini_profile", detail.record.gemini_profile],
     ["menu", detail.record.menu],
+    ["rooms", detail.record.rooms],
     ["facebook", detail.record.facebook],
   ];
   return (

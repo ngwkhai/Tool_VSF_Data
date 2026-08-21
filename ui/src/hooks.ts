@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { WorkerEvent } from "./types";
+import { api } from "./api";
+import type { AppConfig, WorkerEvent } from "./types";
 
 /** Tải dữ liệu kèm trạng thái chờ/lỗi và một hàm `reload()` để gọi lại. */
 export function useLoad<T>(fn: () => Promise<T>, deps: unknown[] = []) {
@@ -80,4 +81,40 @@ export function useEventLog(keep = 200) {
   const [log, setLog] = useState<WorkerEvent[]>([]);
   useWorkerEvents((e) => setLog((prev) => [...prev, e].slice(-keep)));
   return log;
+}
+
+/**
+ * Cấu hình profile, tải MỘT lần cho cả ứng dụng.
+ *
+ * Danh sách bước và danh sách cột khác nhau giữa hai profile, nên client không
+ * được giữ bản sao của riêng nó — trước đây `JobTable` chép cứng 6 tên bước và
+ * mọi job lưu trú hiện sai ô `menu` trong khi thiếu hẳn `rooms`. Đây là nguồn
+ * duy nhất, và nó đến từ server.
+ */
+let configPromise: Promise<AppConfig> | null = null;
+
+export function useConfig(): AppConfig | null {
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  useEffect(() => {
+    let alive = true;
+    configPromise ??= api.config();
+    configPromise
+      .then((c) => alive && setConfig(c))
+      .catch(() => {
+        // Cấu hình hỏng không được làm trắng cả trang: nơi gọi tự lùi về thứ tự
+        // bước đọc được từ chính bản ghi.
+        configPromise = null;
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return config;
+}
+
+/** Thứ tự bước của một profile; chưa tải xong thì trả null để nơi gọi tự lùi. */
+export function useStepOrder(profile: string | undefined): string[] | null {
+  const config = useConfig();
+  if (!config) return null;
+  return config.profiles[profile ?? config.default_profile]?.steps ?? null;
 }

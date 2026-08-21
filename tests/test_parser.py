@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from vsf.models import PROFILE_FIELDS, parse_profile_block, slugify
+from vsf.models import parse_profile_block as _parse, slugify
+from vsf.profiles.food import FIELD_ALIASES, LIST_FIELDS, PROFILE_FIELDS
+
+
+def parse_profile_block(raw):
+    """Parser giờ nhận bộ trường theo profile; test này nói về profile food."""
+    return _parse(raw, PROFILE_FIELDS, LIST_FIELDS, FIELD_ALIASES)
+
 
 # Text thật lấy từ chính chat Gemini #1 của người dùng (recon 2026-08-11).
 REAL = (Path(__file__).parent / "fixtures" / "gemini_profile_real.txt").read_text(
